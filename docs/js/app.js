@@ -7,7 +7,7 @@ import { netSleepDuration, classifySleep, findSleepOverlap } from "./sleep.js";
 import { ageWakeWindowRef, dailySleepRefHours, computeSchedule } from "./schedule.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.17-fase1";
+const APP_VERSION = "2026.09.17-fase2";
 const KIND = { "peito-e": "Peito esquerdo", "peito-d": "Peito direito", "mamadeira": "Mamadeira", "solido": "Comida" };
 const DIAPER_LABEL = { "xixi": "Xixi", "coco": "Cocô", "ambos": "Xixi e cocô" };
 const PLACE_LABEL = { berco: "berço", colo: "colo", carrinho: "carrinho", carro: "carro", sling: "sling" };

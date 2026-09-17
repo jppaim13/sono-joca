@@ -20,7 +20,9 @@ create table public.live_state (
   feed_start bigint,
   feed_kind text check (feed_kind is null or feed_kind in ('peito-e','peito-d','mamadeira','solido')),
   feed_by uuid references auth.users(id),
-  updated_at bigint not null
+  updated_at bigint not null,
+  version integer not null default 1,
+  last_edited_by uuid references auth.users(id)
 );
 
 create table public.events (
@@ -33,10 +35,13 @@ create table public.events (
   note varchar(200),
   by_user_id uuid references auth.users(id),
   deleted boolean not null default false,
-  updated_at bigint not null
+  updated_at bigint not null,
+  version integer not null default 1,
+  last_edited_by uuid references auth.users(id)
 );
 create index events_start_idx on public.events (start);
 create index events_updated_at_idx on public.events (updated_at);
+create index events_deleted_updated_idx on public.events (updated_at) where deleted = true;
 
 -- Linha única (singleton) para bebê e cronômetros compartilhados.
 insert into public.baby (id, updated_at) values (1, 0);

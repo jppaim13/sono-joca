@@ -14,7 +14,7 @@ const loadSbConfig = () => { try { return JSON.parse(localStorage.getItem(SB_CON
 const saveSbConfig = v => { try { localStorage.setItem(SB_CONFIG_KEY, JSON.stringify(v)); } catch {} };
 let sb = null;
 
-const S = { config: { name: "Joaquim", birth: "" }, live: { version: 1 }, ev: {}, users: {}, since: 0, uid: null, tab: "hoje", online: true };
+const S = { config: { name: "Joaquim", birth: "" }, live: { version: 1 }, ev: {}, users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "" };
 let editing = null, adjusting = null;
 let outboxCache = [];
 let errorMap = {};
@@ -86,6 +86,7 @@ async function loadLocal() {
   S.since = (await store.getMeta("since")) || 0;
   S.uid = await store.getMeta("uid");
   S.users = (await store.getMeta("users")) || {};
+  S.deviceName = (await store.getMeta("deviceName")) || "";
   outboxCache = await store.getOutbox();
 }
 async function persistMeta() {
@@ -120,9 +121,12 @@ const rowToEvent = r => {
   if (r.kind) e.kind = r.kind; if (r.end) e.end = r.end; if (r.ml != null) e.ml = r.ml;
   if (r.note) e.note = r.note; if (r.by_user_id) e.by = r.by_user_id; if (r.deleted) e.deleted = true;
   if (r.last_edited_by) e.lastEditedBy = r.last_edited_by;
+  if (r.device_name) e.deviceName = r.device_name;
   return e;
 };
-const rowToLive = r => ({ sleepStart: r.sleep_start, sleepBy: r.sleep_by, feedStart: r.feed_start, feedKind: r.feed_kind, feedBy: r.feed_by, version: r.version || 1, lastEditedBy: r.last_edited_by || null });
+const rowToLive = r => ({ sleepStart: r.sleep_start, sleepBy: r.sleep_by, feedStart: r.feed_start, feedKind: r.feed_kind, feedBy: r.feed_by, version: r.version || 1, lastEditedBy: r.last_edited_by || null, deviceName: r.device_name || null });
+// Mapeia o formato local (rowToEvent/rowToLive) para o que resolveEditorName espera do banco.
+const nameFor = obj => resolveEditorName({ device_name: obj.deviceName, last_edited_by: obj.lastEditedBy, by_user_id: obj.by || obj.sleepBy || obj.feedBy }, S.users);
 
 /* ---------- outbox / flush / sync ---------- */
 async function flushOp(op) {
@@ -245,7 +249,7 @@ function updateBanner() {
 function newEventRow(ev, now) {
   return { id: ev.id, type: ev.type, kind: ev.kind || null, start: ev.start, end: ev.end || null,
     ml: ev.kind === "mamadeira" ? (ev.ml ?? null) : null, note: ev.note || null,
-    by_user_id: ev.by || S.uid, last_edited_by: S.uid, deleted: false, updated_at: now, version: 1 };
+    by_user_id: ev.by || S.uid, last_edited_by: S.uid, device_name: S.deviceName || null, deleted: false, updated_at: now, version: 1 };
 }
 async function putNewEvent(ev) {
   const now = Date.now();
@@ -258,7 +262,7 @@ async function putNewEvent(ev) {
 async function putEditedEvent(ev, expectedVersion) {
   const now = Date.now();
   const patch = { type: ev.type, kind: ev.kind || null, start: ev.start, end: ev.end || null,
-    ml: ev.kind === "mamadeira" ? (ev.ml ?? null) : null, note: ev.note || null, updated_at: now, last_edited_by: S.uid };
+    ml: ev.kind === "mamadeira" ? (ev.ml ?? null) : null, note: ev.note || null, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
   const row = { ...S.ev[ev.id], ...patch, version: expectedVersion + 1 };
   S.ev[ev.id] = row;
   await store.putEventRow(row);
@@ -267,7 +271,7 @@ async function putEditedEvent(ev, expectedVersion) {
 }
 async function deleteEventNow(id, expectedVersion) {
   const now = Date.now();
-  const patch = { deleted: true, updated_at: now, last_edited_by: S.uid };
+  const patch = { deleted: true, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
   if (S.ev[id]) { S.ev[id] = { ...S.ev[id], ...patch, version: expectedVersion + 1 }; await store.putEventRow(S.ev[id]); }
   await enqueue({ kind: "cond-update", table: "events", id, patch, expectedVersion });
 }
@@ -297,7 +301,7 @@ function setLive(fields, context) {
     version: expectedVersion + 1 };
   S.live = newLive; persistMeta(); render();
   const patch = { sleep_start: newLive.sleepStart, sleep_by: newLive.sleepBy, feed_start: newLive.feedStart,
-    feed_kind: newLive.feedKind, feed_by: newLive.feedBy, updated_at: now, last_edited_by: S.uid };
+    feed_kind: newLive.feedKind, feed_by: newLive.feedBy, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
   enqueue({ kind: "cond-update", table: "live_state", id: 1, patch, expectedVersion, context });
 }
 function setConfig(obj) {
@@ -348,7 +352,9 @@ $("#formLogin").addEventListener("submit", async ev => {
 });
 $("#btnLogout").addEventListener("click", async () => {
   if (outboxCache.length && !confirm("Há alterações ainda não enviadas. Sair mesmo assim?")) return;
-  try { await sb.auth.signOut(); } catch {}
+  // scope "local": sai só deste aparelho, sem derrubar a sessão do outro iPhone
+  // (conta única compartilhada entre os dois).
+  try { await sb.auth.signOut({ scope: "local" }); } catch {}
   S.ev = {}; S.since = 0; S.uid = null; $("#dlgSettings").close(); showLogin();
 });
 $("#btnChangePassword").addEventListener("click", () => {
@@ -448,7 +454,7 @@ function dialSVG(st) {
 }
 
 function nextNapText(st) {
-  if (S.live.sleepStart) return { k: "Dormindo desde", v: fmtTime(S.live.sleepStart), d: `Registrado por <span data-uid="${esc(S.live.sleepBy || "")}">…</span>` };
+  if (S.live.sleepStart) return { k: "Dormindo desde", v: fmtTime(S.live.sleepStart), d: `Registrado por ${esc(nameFor({ ...S.live, by: S.live.sleepBy }))}` };
   if (!st.lastSleep) return { k: "Próximo sono", v: "—", d: `Registre alguns sonos para as previsões aparecerem. Referência para a idade: acordado ${st.lo}–${st.hi} min.` };
   const awake = (st.now - st.lastSleep.end) / MIN;
   const from = st.lastSleep.end + (st.target - 10) * MIN, to = st.lastSleep.end + (st.target + 10) * MIN;
@@ -513,7 +519,6 @@ function renderToday() {
         <span class="d">${lastFeedLine}${fr ? `<br><small style="color:var(--muted)">Referência para a idade: ${fr[0]}–${fr[1]} por dia</small>` : ""}</span></div>
     </section>
     <div class="actions"><button class="btn ghost" data-new>Adicionar registro passado</button></div>`;
-  resolveNames();
 }
 
 /* ---------- render: week ---------- */
@@ -568,13 +573,12 @@ function renderRecords() {
       const title = isS ? `Sono de ${fmtDur((e.end - e.start) / MIN)}` :
         `${KIND[e.kind] || "Mamada"}${e.end ? ` · ${fmtDur((e.end - e.start) / MIN)}` : ""}${e.ml ? ` · ${e.ml} ml` : ""}`;
       html += `<button class="rec" data-edit="${esc(e.id)}">${statusGlyph(e.id)}<span class="dot" style="background:var(${isS ? "--sleep" : "--feed"})"></span>
-        <span class="t">${time}</span><span class="x">${esc(title)}<small>${e.note ? esc(e.note) + " · " : ""}${e.by ? `por <span data-uid="${esc(e.by)}">…</span>` : ""}</small></span></button>`;
+        <span class="t">${time}</span><span class="x">${esc(title)}<small>${e.note ? esc(e.note) + " · " : ""}${e.by ? `por ${esc(nameFor(e))}` : ""}</small></span></button>`;
     }
     html += `</div>`;
   }
   html += `<p class="empty" style="font-size:.88rem">Mostrando os últimos 14 dias. <button class="linklike" id="btnTrash">Lixeira (30 dias)</button></p>`;
   $("#view-registros").innerHTML = html;
-  resolveNames();
 }
 
 /* ---------- lixeira ---------- */
@@ -595,7 +599,7 @@ async function openTrash() {
   $("#dlgTrash").showModal();
 }
 async function restoreEvent(id, expectedVersion) {
-  const patch = { deleted: false, updated_at: Date.now(), last_edited_by: S.uid };
+  const patch = { deleted: false, updated_at: Date.now(), last_edited_by: S.uid, device_name: S.deviceName || null };
   if (S.ev[id]) { S.ev[id] = { ...S.ev[id], ...patch, version: expectedVersion + 1 }; await store.putEventRow(S.ev[id]); }
   await enqueue({ kind: "cond-update", table: "events", id, patch, expectedVersion });
   toast("Registro restaurado.");
@@ -684,12 +688,6 @@ function renderGuide() {
       <tr><td>AAP / HealthyChildren.org, orientação sobre amamentação</td><td>8–12 mamadas por dia no início</td></tr>
       <tr><td>Huckleberry, Napper, Glow Baby, BabyTime</td><td>Inspiração de uso: registro com um toque, previsão de soneca, visão de 24 h, compartilhamento</td></tr>
     </table></div>`;
-}
-
-/* ---------- names ---------- */
-function resolveNames() {
-  document.querySelectorAll("[data-uid]").forEach(e => { const id = e.dataset.uid;
-    e.textContent = id && String(id) === String(S.uid) ? "você" : (S.users[id] || "alguém"); });
 }
 
 /* ---------- render root ---------- */
@@ -793,14 +791,18 @@ $("#formAdjust").addEventListener("submit", ev => {
   else setLive({ ...S.live, feedStart: t });
 });
 
-$("#btnSettings").addEventListener("click", () => {
+function openSettingsDialog() {
   $("#cfgName").value = S.config.name || "";
   $("#cfgBirth").value = S.config.birth || "";
+  $("#cfgDeviceName").value = S.deviceName || "";
   $("#cfgTheme").value = (() => { try { return localStorage.getItem("sono-theme") || "auto"; } catch { return "auto"; } })();
   $("#dlgSettings").showModal();
-});
+}
+$("#btnSettings").addEventListener("click", openSettingsDialog);
 $("#formSettings").addEventListener("submit", () => {
   const theme = $("#cfgTheme").value; applyTheme(theme); try { localStorage.setItem("sono-theme", theme); } catch {}
+  const deviceName = $("#cfgDeviceName").value.trim();
+  S.deviceName = deviceName; store.setMeta("deviceName", deviceName);
   setConfig({ name: $("#cfgName").value.trim() || "Bebê", birth: $("#cfgBirth").value });
 });
 function applyTheme(t) { if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
@@ -905,6 +907,9 @@ function boot() {
       if (navigator.storage && navigator.storage.persist) {
         navigator.storage.persist().then(granted => store.addLog({ kind: "storage-persist", detail: granted ? "granted" : "denied" }));
       }
+      // Conta única compartilhada entre os dois iPhones: sem nome de aparelho definido,
+      // não dá pra saber depois "quem" fez o quê — pede logo na primeira abertura.
+      if (!S.deviceName) openSettingsDialog();
     } else { S.uid = null; showLogin(); }
   });
   subscribeRealtime();

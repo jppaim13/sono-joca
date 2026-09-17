@@ -20,7 +20,7 @@ docs/               app do celular — é o que o GitHub Pages publica
 supabase/
   schema.sql          foto atual completa do schema (tabelas + RLS + índices)
   migrations/         mudanças incrementais, uma por arquivo, idempotentes
-  seed_profiles.sql   nomes dos usuários (rodar depois de criar cada um)
+  seed_profiles.sql   fallback do nome de conta (conta única — ver Autenticação)
 tests/               testes automatizados (Node, node:test) dos módulos puros de docs/js/
 ```
 
@@ -40,11 +40,15 @@ Feito:
 - **Senha definida para o usuário Papai** em Authentication → Users.
 - Validado no `localhost`: login, registro offline, persistência após reload, lixeira (checklist
   completo, 7 passos).
+- **Decisão: conta única, compartilhada entre os dois iPhones** (em vez de um usuário por pessoa) —
+  ver seção Autenticação. Cada aparelho tem seu próprio nome (Configurações → "Nome deste aparelho"),
+  usado em "registrado por" e nos avisos de conflito; não é mais necessário criar um segundo usuário.
+- **Migração `supabase/migrations/002_device_name.sql` aplicada e verificada** — `device_name`
+  já existe em `events` e `live_state`.
 
 Pendente:
-- Criar o segundo usuário (Mamãe) em Authentication → Users, definir a senha dela e cadastrar o perfil
-  (ver comentário em `supabase/seed_profiles.sql`).
-- Testar o fluxo completo em produção nos dois celulares (roteiro na seção Testes abaixo).
+- Testar o fluxo completo em produção nos dois celulares (roteiro na seção Testes abaixo), incluindo
+  definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
 
 **Detalhe importante para quem for mexer no banco:** o projeto Supabase usado
@@ -60,11 +64,13 @@ Pendente:
 1. Crie um projeto no [supabase.com](https://supabase.com) (ou use um existente — cuidado se for
    compartilhado com outro app, ver aviso acima).
 2. No **SQL Editor** do projeto, rode o conteúdo de `supabase/schema.sql`.
-3. Em **Authentication → Users**, crie um usuário para cada pessoa: e-mail + uma senha de verdade
-   (mínimo 10 caracteres — é a senha real de login, dá pra trocar depois em Configurações → Trocar
-   senha) + "Auto Confirm User" ligado.
-4. Copie o UUID de cada usuário criado e rode um `insert into public.profiles` para cada um
-   (modelo em `supabase/seed_profiles.sql`).
+3. Em **Authentication → Users**, crie **um usuário só** (é uma conta única, usada nos dois
+   aparelhos — ver seção Autenticação): e-mail + uma senha de verdade (mínimo 10 caracteres — é a
+   senha real de login, dá pra trocar depois em Configurações → Trocar senha) + "Auto Confirm User"
+   ligado.
+4. Copie o UUID do usuário criado e rode o `insert into public.profiles` (modelo em
+   `supabase/seed_profiles.sql`) — é só um fallback para quando o nome do aparelho ainda não foi
+   definido, não precisa de uma linha por pessoa.
 5. Em **Authentication → Sign In / Providers**, desligue **"Allow new users to sign up"** (ver aviso
    acima sobre por quê).
 6. No GitHub, vá em **Settings → Pages** e configure **Deploy from branch**: `main` / pasta `/docs`
@@ -137,13 +143,27 @@ Trocar senha, `updateUser({password})` (só troca a senha de quem já está loga
 importante manter "Allow new users to sign up" desligado no Supabase (ver Pendências acima), porque a
 anon key é pública e alguém poderia chamar a API de cadastro diretamente, sem passar pelo app.
 
-Não existe cadastro público — só os e-mails criados manualmente em Authentication → Users conseguem
+Não existe cadastro público — só o e-mail criado manualmente em Authentication → Users consegue
 entrar, com a senha definida lá (ou trocada depois em Configurações → Trocar senha — é a mesma conta
 usada no outro app, então a senha muda nos dois). A segurança dos dados vem das políticas de RLS no
 banco (`supabase/schema.sql`), não do sigilo da anon key. A sessão persiste entre aberturas do app e o
 token renova sozinho — login só é pedido de novo se a sessão expirar de verdade; como o iPhone não roda
 nada em segundo plano, o app força uma resincronização e reconecta o Realtime toda vez que volta ao
 primeiro plano (`visibilitychange`, `pageshow`, `focus`, `online`).
+
+**Conta única, dois aparelhos.** As duas pessoas entram com o mesmo e-mail e senha — não há um usuário
+por pessoa. Isso simplifica o Supabase (um só cadastro, uma só senha para lembrar), mas significa que
+`by_user_id`/`last_edited_by` (o UUID de quem escreveu) deixam de servir para diferenciar quem fez o
+quê, já que é sempre a mesma conta. Por isso cada aparelho tem seu próprio nome, guardado só localmente
+(Configurações → "Nome deste aparelho", ex.: "iPhone do Papai") e enviado em toda escrita numa coluna
+`device_name` (`events`/`live_state` — migração `002_device_name.sql`). É esse nome que aparece em
+"registrado por" e nos avisos de conflito; a busca por `last_edited_by`/`by_user_id` só entra como
+fallback para linhas de antes dessa mudança. O app pede o nome do aparelho automaticamente na primeira
+vez que abre logado, se ainda não estiver definido.
+
+**Sair só deste aparelho:** o botão "Sair desta conta" usa `signOut({ scope: 'local' })` — encerra a
+sessão só no aparelho em que foi tocado, sem derrubar o login do outro iPhone (o padrão do Supabase,
+sem esse `scope`, invalidaria a sessão nos dois ao mesmo tempo).
 
 ## Plataforma-alvo: só iPhone (PWA instalado)
 
@@ -175,14 +195,16 @@ versão do PWA sem trocar sozinho no meio de um registro; 28 testes automatizado
 
 ## Roteiro de testes manuais (Fase 0 — confiabilidade, no iPhone real)
 
-Com dois iPhones instalados (iOS 17+), logados como as duas pessoas:
+Com dois iPhones instalados (iOS 17+), logados com a **mesma conta** (e-mail e senha únicos):
 
 1. Abrir pelo Safari sem instalar → aparece a tela pedindo para instalar. Instalar e abrir pelo ícone.
 2. Login com e-mail e senha (aceitar a sugestão das Chaves do iCloud/Face ID se o iOS oferecer) →
-   entra. Sessão continua depois de fechar e reabrir o app.
-3. Modo avião → registrar um sono → o item aparece com ⟳ em Registros → voltar a rede → vira ✓.
-4. Os dois tocam "Dormiu"/"Acordou" quase juntos → quem perder a corrida vê um toast avisando quem já
-   registrou, sem apagar o dado do outro.
+   entra. Configurações abre sozinha pedindo o nome do aparelho (ex.: "iPhone do Papai" num,
+   "iPhone da Mamãe" no outro) — preencher e salvar. Sessão continua depois de fechar e reabrir o app.
+3. Modo avião → registrar um sono → o item aparece com ⟳ em Registros → voltar a rede → vira ✓. Em
+   Registros, "por" deve mostrar o nome do aparelho, não "por você"/UUID.
+4. Os dois tocam "Dormiu"/"Acordou" quase juntos → quem perder a corrida vê um toast com o **nome do
+   aparelho** que já registrou (não "Alguém"), sem apagar o dado do outro.
 5. Deixar o cronômetro de sono aberto além do limiar (ajuste a hora do sistema para simular) → aparece
    o aviso "Esqueceu de parar?" na tela Hoje.
 6. Apagar um registro → "Desfazer" no toast dentro de 10s recupera; apagar de novo e não desfazer →
@@ -193,5 +215,6 @@ Com dois iPhones instalados (iOS 17+), logados como as duas pessoas:
    Realtime reconecta sozinho (testar registrando algo no outro iPhone enquanto o primeiro estava em
    segundo plano).
 10. Fechar o app com alterações pendentes offline, reabrir → a fila continua e envia quando a rede volta.
-11. Depois de publicar uma atualização (novo `sono-shell-vN` em `docs/sw.js`), reabrir o app já instalado
+11. "Sair desta conta" num dos iPhones → o outro continua logado (sessão só cai no aparelho que saiu).
+12. Depois de publicar uma atualização (novo `sono-shell-vN` em `docs/sw.js`), reabrir o app já instalado
     → aparece o toast "Nova versão disponível" sem recarregar sozinho no meio de um registro.

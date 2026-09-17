@@ -235,6 +235,10 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 
 <dialog id="dlgSettings"><form method="dialog" id="formSettings">
   <h2>Configurações</h2>
+  <label for="cfgDeviceName">Nome deste aparelho</label>
+  <input id="cfgDeviceName" maxlength="40" placeholder="ex.: iPhone do Papai" required>
+  <p style="color:var(--muted);font-size:.85rem;margin:4px 0 0">A conta é a mesma nos dois celulares —
+  esse nome é o que aparece em "registrado por" e nos avisos de conflito.</p>
   <label for="cfgName">Nome do bebê</label><input id="cfgName" maxlength="40" required>
   <label for="cfgBirth">Data de nascimento</label><input type="date" id="cfgBirth">
   <label for="cfgTheme">Aparência</label>

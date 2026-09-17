@@ -19,13 +19,25 @@ test("resposta nula também é tratada como conflito", () => {
   assert.equal(r.ok, false);
 });
 
-test("resolveEditorName usa last_edited_by quando presente", () => {
+test("resolveEditorName prioriza device_name mesmo com last_edited_by/by_user_id presentes", () => {
+  const users = { "u1": "Conta única" };
+  const row = { device_name: "iPhone João", last_edited_by: "u1", by_user_id: "u1" };
+  assert.equal(resolveEditorName(row, users), "iPhone João");
+});
+
+test("resolveEditorName trata device_name vazio como ausente e cai para o fallback", () => {
+  const users = { "u1": "Papai" };
+  const row = { device_name: "", last_edited_by: "u1", by_user_id: "u1" };
+  assert.equal(resolveEditorName(row, users), "Papai");
+});
+
+test("resolveEditorName usa last_edited_by quando não há device_name (linha antes da conta única)", () => {
   const users = { "u1": "Papai", "u2": "Mamãe" };
   const row = { last_edited_by: "u2", by_user_id: "u1" };
   assert.equal(resolveEditorName(row, users), "Mamãe");
 });
 
-test("resolveEditorName cai para by_user_id quando last_edited_by é nulo (linha antiga)", () => {
+test("resolveEditorName cai para by_user_id quando last_edited_by é nulo (linha bem antiga)", () => {
   const users = { "u1": "Papai" };
   const row = { last_edited_by: null, by_user_id: "u1" };
   assert.equal(resolveEditorName(row, users), "Papai");

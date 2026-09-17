@@ -22,7 +22,8 @@ create table public.live_state (
   feed_by uuid references auth.users(id),
   updated_at bigint not null,
   version integer not null default 1,
-  last_edited_by uuid references auth.users(id)
+  last_edited_by uuid references auth.users(id),
+  device_name text
 );
 
 create table public.events (
@@ -37,7 +38,8 @@ create table public.events (
   deleted boolean not null default false,
   updated_at bigint not null,
   version integer not null default 1,
-  last_edited_by uuid references auth.users(id)
+  last_edited_by uuid references auth.users(id),
+  device_name text
 );
 create index events_start_idx on public.events (start);
 create index events_updated_at_idx on public.events (updated_at);

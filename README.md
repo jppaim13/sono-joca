@@ -15,7 +15,8 @@ pública por design e a segurança real vem das políticas de RLS)
 docs/               app do celular — é o que o GitHub Pages publica
   index.html         casca HTML/CSS, carrega js/app.js como módulo
   js/                lógica: app.js (render + Supabase) e módulos puros/testáveis
-                      (time.js, validation.js, outbox.js, conflict.js, undo.js, store.js)
+                      (time.js, validation.js, outbox.js, conflict.js, undo.js, store.js,
+                      timeinput.js, sleep.js)
   sw.js               service worker (cache do app shell + aviso de nova versão)
 supabase/
   schema.sql          foto atual completa do schema (tabelas + RLS + índices)
@@ -46,10 +47,18 @@ Feito:
 - **Migração `supabase/migrations/002_device_name.sql` aplicada e verificada** — `device_name`
   já existe em `events` e `live_state`.
 
+- **Fase 1 (registro rápido e completo)** implementada — ver
+  [Fase 1 — registro rápido e completo](#fase-1--registro-rápido-e-completo) abaixo.
+- **Migrações `003_fases_1_a_6.sql` e `004_pausas_sono.sql` aplicadas e verificadas** — novos tipos
+  de evento, `data`/`is_night` em `events`, `settings` em `baby`, `pauses` em `live_state`, e as
+  tabelas `sono_growth`/`sono_agenda`/`sono_journal`/`sono_push_subscriptions`/
+  `sono_notification_prefs`/`sono_notification_log`/`sono_quick_tokens` com RLS.
+
 Pendente:
-- Testar o fluxo completo em produção nos dois celulares (roteiro na seção Testes abaixo), incluindo
+- Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo
   definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
+- Fases 2–6 (previsão, push/atalhos, tendências, sons, agenda/conteúdo) — ainda não iniciadas.
 
 **Detalhe importante para quem for mexer no banco:** o projeto Supabase usado
 (`lozveygdolwouekvxwkz`, região sa-east-1) é **compartilhado** com outro app do dono do repositório
@@ -218,3 +227,72 @@ Com dois iPhones instalados (iOS 17+), logados com a **mesma conta** (e-mail e s
 11. "Sair desta conta" num dos iPhones → o outro continua logado (sessão só cai no aparelho que saiu).
 12. Depois de publicar uma atualização (novo `sono-shell-vN` em `docs/sw.js`), reabrir o app já instalado
     → aparece o toast "Nova versão disponível" sem recarregar sozinho no meio de um registro.
+
+## Fase 1 — registro rápido e completo
+
+Tudo passa pelo mesmo outbox/conflito da Fase 0 (fila local, `version`, `last_edited_by`, `device_name`)
+— nenhuma escrita nova criou um caminho paralelo. Resumo do que entrou:
+
+- **Novos tipos de evento**, na mesma tabela `events` (coluna `type` ampliada, campos variáveis em
+  `data` jsonb): Extração de leite (`pump`, com lado e ml), Fralda (`diaper`, xixi/cocô/ambos), Remédio
+  (`medicine`, nome/dose/intervalo), Banho (`bath`), Atividade (`activity`). Mamadeira ganhou tipo de
+  leite (fórmula/materno ordenhado/misto).
+- **Sono**: pausar/retomar durante o cronômetro (sincronizado ao vivo entre os dois aparelhos via
+  `live_state.pauses`) — a duração mostrada no toast final já desconta as pausas; local do sono
+  (berço/colo/carrinho/carro/sling); "tentei e não dormiu"/"cochilou em movimento"; classificação
+  soneca × sono noturno automática pela janela configurada (padrão 19h–7h), com opção de marcar
+  manualmente (`is_night`).
+- **Crescimento** (`sono_growth`) e **Agenda** (`sono_agenda`, consultas/vacinas/passeios/banho) —
+  tabelas próprias, mesmo padrão de conflito. A última pesagem aparece na tela Hoje; os próximos 3
+  compromissos futuros também.
+- **Colisão de sono**: salvar um sono que se sobrepõe a outro já registrado oferece Cancelar, Editar o
+  existente ou Substituir (apaga o antigo e salva o novo).
+- **Relógio interativo**: tocar num arco de sono ou ponto de mamada abre aquele registro para editar;
+  tocar num espaço vazio do relógio abre "novo registro" já com aquele horário.
+- **Entrada de horário**: botões "Agora"/"−5"/"−10"/"−15" no início do registro, além do seletor de
+  data/hora nativo (para escolher outro dia).
+- **"Acordado há X"** sempre visível no topo da tela Hoje quando não está dormindo; barra "Acordou
+  HH:MM · Ajustar" / "Terminou HH:MM · Ajustar" por 5s depois de parar um cronômetro.
+- **Atalhos configuráveis**: Configurações → "Atalhos da tela Hoje" — mostrar/esconder e reordenar
+  (↑/↓) os botões secundários (Peito E/D/Mamadeira continuam sempre fixos na barra principal).
+- **Onboarding de 3 telas** (como registrar, previsão × plano, calibração), mostrado uma vez após
+  definir o nome do aparelho pela primeira vez; pulável.
+
+**Simplificações assumidas** (documentadas para retomar depois, se quiser mais):
+- Sem histórico completo de crescimento ainda — só a última medida aparece e é editável na tela Hoje;
+  a lista completa e o gráfico ficam para a Fase 4 (curva de crescimento OMS).
+- Sem lixeira/desfazer para Crescimento e Agenda (só `events` tem isso por enquanto) — apagar é direto.
+- Atividade e Banho não têm um sub-tipo próprio além da Observação livre.
+- A cor do ponto/traço no relógio e em Registros continua só sono (roxo) × todo o resto (laranja) — sem
+  uma cor por tipo novo.
+- Reordenar atalhos é por botões ↑/↓, não arrastar.
+
+## Checklist local (Fase 1, Chrome/`localhost`)
+
+Além do checklist da Fase 0 acima, depois de rodar as migrações `003`/`004`:
+
+1. Criar um sono com pausa: "Dormiu" → "Pausar (acordou um pouco)" → esperar → "Retomar sono" →
+   "Acordou". O toast final deve indicar duração líquida descontando a pausa.
+2. Tocar num atalho (ex. Fralda) → salvar → aparece em Registros com o texto certo (ex. "Fralda · Xixi").
+3. Criar Crescimento (peso/altura) pelo atalho → aparece a última pesagem na tela Hoje → tocar nela →
+   edita.
+4. Criar um compromisso de Agenda para as próximas horas → aparece em "Próximos compromissos" na tela
+   Hoje → tocar → edita.
+5. Criar um sono que se sobrepõe a outro já existente → aparece a tela de colisão → testar "Substituir".
+6. Tocar num arco do relógio → abre esse sono para editar. Tocar num espaço vazio do relógio → abre
+   "novo registro" com aquele horário preenchido.
+7. Em Configurações → "Atalhos da tela Hoje", esconder um atalho e mover outro para cima → salvar →
+   a tela Hoje reflete a nova ordem/visibilidade.
+
+## Roteiro de testes manuais (Fase 1, no iPhone real)
+
+1. Login com uma conta que ainda não tem nome de aparelho definido → Configurações abre sozinha →
+   depois de salvar, aparece o onboarding de 3 telas → "Pular" ou percorrer até "Entendi".
+2. Testar pausar/retomar um sono com o app em segundo plano no meio (trocar de app e voltar) — o estado
+   de pausa deve estar certo ao voltar.
+3. Testar os atalhos configuráveis: abrir Configurações, esconder "Banho", tocar em Hoje → não deve mais
+   aparecer; reabrir Configurações e marcar de novo.
+4. Tocar num arco do relógio de sono com o dedo (não com mouse) — confirmar que abre o registro certo
+   mesmo num alvo pequeno; se for difícil de acertar, é um ponto para revisar a área de toque depois.
+5. Testar o fluxo de colisão de sono nos dois aparelhos ao mesmo tempo (um cria um sono enquanto o outro
+   edita um horário que colide) — não deve haver perda de dado, só o aviso de colisão.

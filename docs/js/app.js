@@ -2,11 +2,32 @@ import { MIN, HOUR, DAY, midnight, overlap, fmtDur, fmtClock, dayKey } from "./t
 import { checkSleepDuration, isSleepForgotten } from "./validation.js";
 import { resolveWrite, resolveEditorName } from "./conflict.js";
 import { scheduleDelete, cancelDelete, isPending, isExpired, UNDO_WINDOW_MS } from "./undo.js";
+import { parseDigitsToTime, offsetFromNow } from "./timeinput.js";
+import { netSleepDuration, classifySleep, findSleepOverlap } from "./sleep.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.17-fase0";
+const APP_VERSION = "2026.09.17-fase1";
 const KIND = { "peito-e": "Peito esquerdo", "peito-d": "Peito direito", "mamadeira": "Mamadeira", "solido": "Comida" };
+const DIAPER_LABEL = { "xixi": "Xixi", "coco": "Cocô", "ambos": "Xixi e cocô" };
+const PLACE_LABEL = { berco: "berço", colo: "colo", carrinho: "carrinho", carro: "carro", sling: "sling" };
+const MILK_LABEL = { formula: "fórmula", materno: "materno ordenhado", misto: "misto" };
+const AGENDA_KIND_LABEL = { consulta: "Consulta", vacina: "Vacina", banho: "Banho", passeio: "Passeio", outro: "Compromisso" };
 const HISTORY_DAYS = 60;
+
+// Catálogo dos atalhos configuráveis da tela Hoje (além de Peito E/D/Mamadeira, que ficam
+// sempre fixos na barra principal).
+const SHORTCUT_CATALOG = {
+  solido: { label: "Sólido" }, pump: { label: "Extração" }, diaper: { label: "Fralda" },
+  medicine: { label: "Remédio" }, bath: { label: "Banho" }, activity: { label: "Atividade" },
+  growth: { label: "Crescimento" }, agenda: { label: "Agenda" },
+};
+const DEFAULT_SHORTCUTS = ["diaper", "pump", "solido", "medicine", "bath", "activity", "growth", "agenda"].map(id => ({ id, visible: true }));
+
+const ONBOARDING_SCREENS = [
+  { title: "Como registrar", body: "Toque em <strong>Dormiu</strong> no centro do relógio para iniciar o cronômetro de sono, e em <strong>Acordou</strong> para parar. Peito E/D e Mamadeira ficam logo abaixo. Fralda, remédio, banho e outros ficam nos atalhos — escolha quais aparecem em Configurações." },
+  { title: "Previsão × Plano", body: "O app mostra uma <strong>previsão</strong> do próximo sono, baseada na idade e, depois de alguns dias, no padrão real do bebê — não é uma regra fixa. Dá pra marcar um sono como noturno ou soneca manualmente, e ajustar horários depois." },
+  { title: "Calibração", body: "Nos primeiros dias a previsão usa só a faixa típica da idade. Depois de alguns sonos nos últimos 3 dias, ela passa a seguir o padrão real do bebê — quanto mais registros, mais precisa fica." },
+];
 
 /* ---------- Supabase ---------- */
 const SB_CONFIG_KEY = "sono-sb-config";
@@ -14,8 +35,11 @@ const loadSbConfig = () => { try { return JSON.parse(localStorage.getItem(SB_CON
 const saveSbConfig = v => { try { localStorage.setItem(SB_CONFIG_KEY, JSON.stringify(v)); } catch {} };
 let sb = null;
 
-const S = { config: { name: "Joaquim", birth: "" }, live: { version: 1 }, ev: {}, users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "" };
-let editing = null, adjusting = null;
+const S = { config: { name: "Joaquim", birth: "", settings: {} }, live: { version: 1, pauses: [] }, ev: {}, growth: {}, agenda: {},
+  users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "", onboardingDone: false };
+let editing = null, adjusting = null, editingGrowth = null, editingAgenda = null;
+let pendingSave = null, pendingOverlapId = null, pendingOverlapVersion = 1;
+let obStep = 0;
 let outboxCache = [];
 let errorMap = {};
 let pendingDeletes = {};
@@ -33,6 +57,7 @@ const dayLabel = ms => { const t = midnight(Date.now()); const d = midnight(ms);
   if (d === t) return "Hoje"; if (d === t - DAY) return "Ontem";
   return new Date(ms).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric", month: "short" }); };
 const median = a => { const s = [...a].sort((x, y) => x - y); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+function nightWindow() { const s = S.config.settings || {}; return [Number.isFinite(s.nightStart) ? s.nightStart : 19, Number.isFinite(s.nightEnd) ? s.nightEnd : 7]; }
 
 function toast(msg) {
   const t = $("#toast");
@@ -46,6 +71,12 @@ function toastAction(html, onClick, ms) {
   const btn = t.querySelector("[data-toast-action]");
   if (btn) btn.addEventListener("click", () => { t.hidden = true; onClick(); });
   toast._t = setTimeout(() => { t.hidden = true; }, ms);
+}
+function showAdjustBar(eventId, kind, ts) {
+  const label = kind === "sleep" ? "Acordou" : "Terminou";
+  toastAction(`${label} ${fmtTime(ts)} · <button class="linklike" data-toast-action>Ajustar</button>`, () => {
+    const ev = S.ev[eventId]; if (ev) openEvent(ev);
+  }, 5000);
 }
 
 /* ---------- age-based references ---------- */
@@ -82,11 +113,15 @@ async function loadLocal() {
   const evs = await store.getAllEvents();
   for (const e of evs) S.ev[e.id] = e;
   S.config = { ...S.config, ...((await store.getMeta("config")) || {}) };
-  S.live = (await store.getMeta("live")) || { version: 1 };
+  if (!S.config.settings) S.config.settings = {};
+  S.live = { pauses: [], ...(await store.getMeta("live") || { version: 1 }) };
   S.since = (await store.getMeta("since")) || 0;
   S.uid = await store.getMeta("uid");
   S.users = (await store.getMeta("users")) || {};
   S.deviceName = (await store.getMeta("deviceName")) || "";
+  S.onboardingDone = (await store.getMeta("onboardingDone")) || false;
+  S.growth = (await store.getMeta("growth")) || {};
+  S.agenda = (await store.getMeta("agenda")) || {};
   outboxCache = await store.getOutbox();
 }
 async function persistMeta() {
@@ -95,6 +130,10 @@ async function persistMeta() {
   await store.setMeta("since", S.since);
   await store.setMeta("uid", S.uid);
   await store.setMeta("users", S.users);
+}
+async function persistCollections() {
+  await store.setMeta("growth", S.growth);
+  await store.setMeta("agenda", S.agenda);
 }
 
 function events() {
@@ -122,10 +161,17 @@ const rowToEvent = r => {
   if (r.note) e.note = r.note; if (r.by_user_id) e.by = r.by_user_id; if (r.deleted) e.deleted = true;
   if (r.last_edited_by) e.lastEditedBy = r.last_edited_by;
   if (r.device_name) e.deviceName = r.device_name;
+  if (r.data && Object.keys(r.data).length) e.data = r.data;
+  if (r.is_night != null) e.isNight = r.is_night;
   return e;
 };
-const rowToLive = r => ({ sleepStart: r.sleep_start, sleepBy: r.sleep_by, feedStart: r.feed_start, feedKind: r.feed_kind, feedBy: r.feed_by, version: r.version || 1, lastEditedBy: r.last_edited_by || null, deviceName: r.device_name || null });
-// Mapeia o formato local (rowToEvent/rowToLive) para o que resolveEditorName espera do banco.
+const rowToLive = r => ({ sleepStart: r.sleep_start, sleepBy: r.sleep_by, feedStart: r.feed_start, feedKind: r.feed_kind, feedBy: r.feed_by,
+  pauses: Array.isArray(r.pauses) ? r.pauses : [], version: r.version || 1, lastEditedBy: r.last_edited_by || null, deviceName: r.device_name || null });
+const rowToGrowth = r => ({ id: r.id, measuredAt: r.measured_at, weightG: r.weight_g, heightCm: r.height_cm, headCm: r.head_cm, note: r.note,
+  by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
+const rowToAgenda = r => ({ id: r.id, kind: r.kind, title: r.title, scheduledAt: r.scheduled_at, durationMin: r.duration_min, note: r.note,
+  completed: !!r.completed, by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
+// Mapeia o formato local (rowToEvent/rowToLive/rowToGrowth/rowToAgenda) para o que resolveEditorName espera do banco.
 const nameFor = obj => resolveEditorName({ device_name: obj.deviceName, last_edited_by: obj.lastEditedBy, by_user_id: obj.by || obj.sleepBy || obj.feedBy }, S.users);
 
 /* ---------- outbox / flush / sync ---------- */
@@ -144,11 +190,17 @@ async function flushOp(op) {
   return res;
 }
 
+const TABLE_LOCAL = {
+  events: { map: S => S.ev, toLocal: rowToEvent },
+  sono_growth: { map: S => S.growth, toLocal: rowToGrowth },
+  sono_agenda: { map: S => S.agenda, toLocal: rowToAgenda },
+};
+
 async function handleConflict(op) {
   await store.addLog({ kind: "conflict", detail: `${op.table}:${op.id}` });
   const { data: fresh } = await sb.from(op.table).select("*").eq("id", op.id).maybeSingle();
-  if (!fresh) return;
   if (op.table === "live_state") {
+    if (!fresh) return;
     S.live = rowToLive(fresh);
     await persistMeta();
     if (op.context && op.context.expectedSleepStart && !fresh.sleep_start) {
@@ -159,15 +211,19 @@ async function handleConflict(op) {
     } else {
       toast(`${resolveEditorName(fresh, S.users)} alterou o cronômetro em outro aparelho. Atualizado.`);
     }
-  } else if (op.table === "events") {
+  } else if (TABLE_LOCAL[op.table]) {
+    if (!fresh) return;
+    const { map, toLocal } = TABLE_LOCAL[op.table];
     const who = resolveEditorName(fresh, S.users);
-    S.ev[fresh.id] = rowToEvent(fresh);
-    await store.addLog({ kind: "edit-conflict", detail: `events:${op.id} · descartado: ${JSON.stringify(op.patch)} · servidor agora na versão ${fresh.version}` });
-    toastAction(
-      `${who} alterou este registro antes — sua mudança não foi aplicada. <button class="linklike" data-toast-action>Reaplicar</button>`,
-      () => reapplyDiscardedEdit(fresh.id, op.patch),
-      8000
-    );
+    map(S)[fresh.id] = toLocal(fresh);
+    await store.addLog({ kind: "edit-conflict", detail: `${op.table}:${op.id} · descartado: ${JSON.stringify(op.patch)} · servidor agora na versão ${fresh.version}` });
+    if (op.table === "events") {
+      toastAction(
+        `${who} alterou este registro antes — sua mudança não foi aplicada. <button class="linklike" data-toast-action>Reaplicar</button>`,
+        () => reapplyDiscardedEdit(fresh.id, op.patch), 8000);
+    } else {
+      toast(`${who} alterou este registro antes — sua mudança não foi aplicada.`);
+    }
   }
   render();
 }
@@ -214,19 +270,24 @@ async function sync() {
   if (outboxCache.length) return;
   try {
     const cutoff = Date.now() - HISTORY_DAYS * DAY;
-    const [evRes, liveRes, babyRes, profRes] = await Promise.all([
+    const [evRes, liveRes, babyRes, profRes, growthRes, agendaRes] = await Promise.all([
       sb.from("events").select("*").gt("updated_at", S.since).gte("start", cutoff).order("start"),
       sb.from("live_state").select("*").eq("id", 1).maybeSingle(),
       sb.from("baby").select("*").eq("id", 1).maybeSingle(),
       sb.from("profiles").select("id,name"),
+      sb.from("sono_growth").select("*").gt("updated_at", S.since),
+      sb.from("sono_agenda").select("*").gt("updated_at", S.since),
     ]);
-    for (const r of [evRes, liveRes, babyRes, profRes]) if (r.error) throw r.error;
+    for (const r of [evRes, liveRes, babyRes, profRes, growthRes, agendaRes]) if (r.error) throw r.error;
     for (const r of evRes.data) { S.ev[r.id] = rowToEvent(r); await store.putEventRow(S.ev[r.id]); }
     const cut2 = Date.now() - HISTORY_DAYS * DAY;
     for (const id in S.ev) if (S.ev[id].start < cut2) { delete S.ev[id]; await store.deleteEventRow(id); }
+    for (const r of growthRes.data) S.growth[r.id] = rowToGrowth(r);
+    for (const r of agendaRes.data) S.agenda[r.id] = rowToAgenda(r);
+    await persistCollections();
     S.users = {}; for (const p of profRes.data) S.users[p.id] = p.name;
-    S.live = liveRes.data ? rowToLive(liveRes.data) : { version: 1 };
-    if (babyRes.data) S.config = { ...S.config, name: babyRes.data.name, birth: babyRes.data.birth || "" };
+    S.live = liveRes.data ? rowToLive(liveRes.data) : { version: 1, pauses: [] };
+    if (babyRes.data) S.config = { ...S.config, name: babyRes.data.name, birth: babyRes.data.birth || "", settings: babyRes.data.settings || {} };
     S.since = Date.now() - 5000; S.online = true;
     await persistMeta();
     if (!document.querySelector("dialog[open]")) render(); else updateBanner();
@@ -245,11 +306,13 @@ function updateBanner() {
   else b.hidden = true;
 }
 
-/* ---------- writes ---------- */
+/* ---------- writes: events ---------- */
 function newEventRow(ev, now) {
   return { id: ev.id, type: ev.type, kind: ev.kind || null, start: ev.start, end: ev.end || null,
-    ml: ev.kind === "mamadeira" ? (ev.ml ?? null) : null, note: ev.note || null,
-    by_user_id: ev.by || S.uid, last_edited_by: S.uid, device_name: S.deviceName || null, deleted: false, updated_at: now, version: 1 };
+    ml: (ev.kind === "mamadeira" || ev.type === "pump") ? (ev.ml ?? null) : null, note: ev.note || null,
+    by_user_id: ev.by || S.uid, last_edited_by: S.uid, device_name: S.deviceName || null,
+    data: ev.data || {}, is_night: ev.isNight != null ? ev.isNight : null,
+    deleted: false, updated_at: now, version: 1 };
 }
 async function putNewEvent(ev) {
   const now = Date.now();
@@ -262,7 +325,9 @@ async function putNewEvent(ev) {
 async function putEditedEvent(ev, expectedVersion) {
   const now = Date.now();
   const patch = { type: ev.type, kind: ev.kind || null, start: ev.start, end: ev.end || null,
-    ml: ev.kind === "mamadeira" ? (ev.ml ?? null) : null, note: ev.note || null, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+    ml: (ev.kind === "mamadeira" || ev.type === "pump") ? (ev.ml ?? null) : null, note: ev.note || null,
+    data: ev.data || {}, is_night: ev.isNight != null ? ev.isNight : null,
+    updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
   const row = { ...S.ev[ev.id], ...patch, version: expectedVersion + 1 };
   S.ev[ev.id] = row;
   await store.putEventRow(row);
@@ -293,21 +358,81 @@ function undoDelete(id) {
   render();
 }
 
+/* ---------- writes: crescimento ---------- */
+function growthPatch(rec, now) {
+  return { measured_at: rec.measuredAt, weight_g: rec.weightG ?? null, height_cm: rec.heightCm ?? null,
+    head_cm: rec.headCm ?? null, note: rec.note || null, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+}
+async function putNewGrowth(rec) {
+  const now = Date.now();
+  const row = { id: rec.id, ...growthPatch(rec, now), by_user_id: S.uid, deleted: false, version: 1 };
+  S.growth[rec.id] = rowToGrowth(row); await persistCollections(); render();
+  await enqueue({ kind: "insert", table: "sono_growth", row });
+}
+async function putEditedGrowth(rec, expectedVersion) {
+  const now = Date.now();
+  const patch = growthPatch(rec, now);
+  S.growth[rec.id] = rowToGrowth({ ...patch, id: rec.id, version: expectedVersion + 1 }); await persistCollections(); render();
+  await enqueue({ kind: "cond-update", table: "sono_growth", id: rec.id, patch, expectedVersion });
+}
+async function deleteGrowthNow(id, expectedVersion) {
+  const now = Date.now();
+  const patch = { deleted: true, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+  if (S.growth[id]) S.growth[id] = { ...S.growth[id], deleted: true };
+  await persistCollections();
+  await enqueue({ kind: "cond-update", table: "sono_growth", id, patch, expectedVersion });
+}
+
+/* ---------- writes: agenda ---------- */
+function agendaPatch(rec, now) {
+  return { kind: rec.kind, title: rec.title, scheduled_at: rec.scheduledAt, duration_min: rec.durationMin ?? null,
+    note: rec.note || null, completed: !!rec.completed, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+}
+async function putNewAgenda(rec) {
+  const now = Date.now();
+  const row = { id: rec.id, ...agendaPatch(rec, now), by_user_id: S.uid, deleted: false, version: 1 };
+  S.agenda[rec.id] = rowToAgenda(row); await persistCollections(); render();
+  await enqueue({ kind: "insert", table: "sono_agenda", row });
+}
+async function putEditedAgenda(rec, expectedVersion) {
+  const now = Date.now();
+  const patch = agendaPatch(rec, now);
+  S.agenda[rec.id] = rowToAgenda({ ...patch, id: rec.id, version: expectedVersion + 1 }); await persistCollections(); render();
+  await enqueue({ kind: "cond-update", table: "sono_agenda", id: rec.id, patch, expectedVersion });
+}
+async function deleteAgendaNow(id, expectedVersion) {
+  const now = Date.now();
+  const patch = { deleted: true, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+  if (S.agenda[id]) S.agenda[id] = { ...S.agenda[id], deleted: true };
+  await persistCollections();
+  await enqueue({ kind: "cond-update", table: "sono_agenda", id, patch, expectedVersion });
+}
+
+/* ---------- live_state (cronômetro + pausas) ---------- */
 function setLive(fields, context) {
   const now = Date.now();
   const expectedVersion = S.live.version || 1;
   const newLive = { sleepStart: fields.sleepStart || null, sleepBy: fields.sleepBy || null,
     feedStart: fields.feedStart || null, feedKind: fields.feedKind || null, feedBy: fields.feedBy || null,
-    version: expectedVersion + 1 };
+    pauses: Array.isArray(fields.pauses) ? fields.pauses : [], version: expectedVersion + 1 };
   S.live = newLive; persistMeta(); render();
   const patch = { sleep_start: newLive.sleepStart, sleep_by: newLive.sleepBy, feed_start: newLive.feedStart,
-    feed_kind: newLive.feedKind, feed_by: newLive.feedBy, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+    feed_kind: newLive.feedKind, feed_by: newLive.feedBy, pauses: newLive.pauses,
+    updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
   enqueue({ kind: "cond-update", table: "live_state", id: 1, patch, expectedVersion, context });
+}
+function togglePause() {
+  const pauses = Array.isArray(S.live.pauses) ? [...S.live.pauses] : [];
+  const now = Date.now();
+  const openIdx = pauses.findIndex(p => p.end == null);
+  if (openIdx >= 0) pauses[openIdx] = { ...pauses[openIdx], end: now };
+  else pauses.push({ start: now });
+  setLive({ ...S.live, pauses });
 }
 function setConfig(obj) {
   const now = Date.now();
   S.config = { ...S.config, ...obj }; persistMeta(); render();
-  enqueue({ kind: "upsert", table: "baby", row: { id: 1, name: S.config.name, birth: S.config.birth || null, updated_at: now } });
+  enqueue({ kind: "upsert", table: "baby", row: { id: 1, name: S.config.name, birth: S.config.birth || null, settings: S.config.settings || {}, updated_at: now } });
 }
 
 /* ---------- setup (Supabase URL/key, fica só neste aparelho) ---------- */
@@ -374,13 +499,18 @@ function toggleSleep() {
   const now = Date.now();
   if (S.live.sleepStart) {
     const start = S.live.sleepStart, by = S.live.sleepBy;
+    const rawPauses = (Array.isArray(S.live.pauses) ? S.live.pauses : []).map(p => p.end == null ? { ...p, end: now } : p);
     const dur = checkSleepDuration(now - start);
     if (!dur.ok) { toast("Duração acima de 16h. Ajuste o horário de início em Registros antes de parar."); return; }
     if (dur.needsConfirm && !confirm(`Dormiu por ${fmtDur((now - start) / MIN)} — confirma?`)) return;
-    setLive({ ...S.live, sleepStart: null, sleepBy: null }, { expectedSleepStart: start });
+    setLive({ ...S.live, sleepStart: null, sleepBy: null, pauses: [] }, { expectedSleepStart: start });
     if (now - start < MIN) { toast("Sono de menos de 1 minuto não foi salvo."); return; }
-    putNewEvent({ id: uidGen(), type: "sleep", start, end: now, by: by || S.uid || null });
-    toast(`Dormiu ${fmtDur((now - start) / MIN)}. Registro salvo.`);
+    const net = netSleepDuration(start, now, rawPauses);
+    const newId = uidGen();
+    const data = rawPauses.length ? { pauses: rawPauses } : {};
+    putNewEvent({ id: newId, type: "sleep", start, end: now, by: by || S.uid || null, data });
+    showAdjustBar(newId, "sleep", now);
+    toast(`Dormiu ${fmtDur(net / MIN)}${rawPauses.length ? " (líquido, descontando pausas)" : ""}.`);
   } else {
     if (S.live.feedStart) stopFeed(true);
     setLive({ ...S.live, sleepStart: now, sleepBy: S.uid });
@@ -395,8 +525,45 @@ function stopFeed(silent) {
   const { feedStart, feedKind, feedBy } = S.live; if (!feedStart) return;
   const now = Date.now();
   setLive({ ...S.live, feedStart: null, feedKind: null, feedBy: null });
-  putNewEvent({ id: uidGen(), type: "feed", kind: feedKind, start: feedStart, end: now, by: feedBy || S.uid || null });
-  if (!silent) toast(`Mamada de ${fmtDur((now - feedStart) / MIN)} salva.`);
+  const newId = uidGen();
+  putNewEvent({ id: newId, type: "feed", kind: feedKind, start: feedStart, end: now, by: feedBy || S.uid || null });
+  if (!silent) showAdjustBar(newId, "feed", now);
+}
+
+/* ---------- atalhos configuráveis ---------- */
+function getShortcuts() {
+  const s = S.config.settings && S.config.settings.shortcuts;
+  return (Array.isArray(s) && s.length ? s : DEFAULT_SHORTCUTS).filter(x => SHORTCUT_CATALOG[x.id]);
+}
+function moveShortcut(id, dir) {
+  const list = getShortcuts(); const i = list.findIndex(s => s.id === id); const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  S.config.settings = { ...S.config.settings, shortcuts: list };
+  renderShortcutsConfig();
+}
+function setShortcutVisible(id, visible) {
+  const list = getShortcuts().map(s => s.id === id ? { ...s, visible } : s);
+  S.config.settings = { ...S.config.settings, shortcuts: list };
+}
+function renderShortcutsConfig() {
+  const list = getShortcuts();
+  $("#cfgShortcuts").innerHTML = list.map((s, i) => `
+    <div class="shortcut-row">
+      <input type="checkbox" data-sc-visible="${esc(s.id)}" ${s.visible ? "checked" : ""}>
+      <span>${esc(SHORTCUT_CATALOG[s.id].label)}</span>
+      <button type="button" data-sc-up="${esc(s.id)}" ${i === 0 ? "disabled" : ""} aria-label="Subir">↑</button>
+      <button type="button" data-sc-down="${esc(s.id)}" ${i === list.length - 1 ? "disabled" : ""} aria-label="Descer">↓</button>
+    </div>`).join("");
+}
+function openShortcut(id) {
+  if (id === "growth") return openGrowth(lastGrowth());
+  if (id === "agenda") return openAgenda(null);
+  if (id === "solido") return openEvent({ type: "feed", kind: "solido", start: Date.now() });
+  const seed = { type: id, start: Date.now() };
+  if (id === "pump") seed.kind = "peito-e";
+  if (id === "diaper") seed.kind = "xixi";
+  openEvent(seed);
 }
 
 /* ---------- insights ---------- */
@@ -420,6 +587,15 @@ function stats() {
   const lastSleep = sl.slice(-1)[0];
   return { now, w, sleep24: sleep24 / MIN, feedCount, lastFeed, lastBreast, lo, hi, personal, target, gaps: gaps.length, lastSleep };
 }
+function lastGrowth() {
+  const list = Object.values(S.growth).filter(g => g && !g.deleted).sort((a, b) => b.measuredAt - a.measuredAt);
+  return list[0] || null;
+}
+function upcomingAgenda() {
+  const now = Date.now() - HOUR;
+  return Object.values(S.agenda).filter(a => a && !a.deleted && !a.completed && a.scheduledAt >= now)
+    .sort((a, b) => a.scheduledAt - b.scheduledAt).slice(0, 3);
+}
 
 /* ---------- render: today ---------- */
 function polar(cx, cy, r, min) { const a = (min / 1440) * 2 * Math.PI - Math.PI / 2; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
@@ -431,18 +607,18 @@ function dialSVG(st) {
   const cx = 170, cy = 170, r = 142, t0 = midnight(st.now), t1 = t0 + DAY;
   const toM = ms => (ms - t0) / MIN;
   let segs = "";
-  const list = sleeps().map(s => ({ start: s.start, end: s.end }));
-  if (S.live.sleepStart) list.push({ start: S.live.sleepStart, end: st.now, live: true });
+  const list = sleeps().map(s => ({ id: s.id, start: s.start, end: s.end }));
+  if (S.live.sleepStart) list.push({ id: null, start: S.live.sleepStart, end: st.now, live: true });
   for (const s of list) { const a = Math.max(s.start, t0), b = Math.min(s.end, t1); if (b <= a) continue;
-    segs += `<path d="${arc(cx, cy, r, toM(a), Math.max(toM(b), toM(a) + 3))}" stroke="var(--sleep)" stroke-width="22" fill="none" stroke-linecap="butt" ${s.live ? 'opacity=".75"' : ""}/>`; }
+    segs += `<path d="${arc(cx, cy, r, toM(a), Math.max(toM(b), toM(a) + 3))}" stroke="var(--sleep)" stroke-width="22" fill="none" stroke-linecap="butt" ${s.live ? 'opacity=".75"' : ""} ${s.id ? `data-event-id="${esc(s.id)}" style="cursor:pointer"` : ""}/>`; }
   let dots = "";
-  for (const f of feeds()) if (f.start >= t0 && f.start < t1) { const [x, y] = polar(cx, cy, r + 20, toM(f.start)); dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="var(--feed)"/>`; }
+  for (const f of feeds()) if (f.start >= t0 && f.start < t1) { const [x, y] = polar(cx, cy, r + 20, toM(f.start)); dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6" fill="transparent" data-event-id="${esc(f.id)}" style="cursor:pointer"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="var(--feed)" style="pointer-events:none"/>`; }
   let ticks = "";
   for (let h = 0; h < 24; h++) { const [x1, y1] = polar(cx, cy, r - 15, h * 60), [x2, y2] = polar(cx, cy, r - (h % 6 ? 19 : 24), h * 60);
     ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="var(--muted)" stroke-width="${h % 6 ? 1 : 1.6}" opacity=".6"/>`; }
   const labels = [[0, "0h"], [360, "6h"], [720, "12h"], [1080, "18h"]].map(([m, l]) => { const [x, y] = polar(cx, cy, r - 36, m); return `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" font-size="11" fill="var(--muted)">${l}</text>`; }).join("");
   const [hx, hy] = polar(cx, cy, r + 13, toM(st.now)), [hx2, hy2] = polar(cx, cy, r - 13, toM(st.now));
-  return `<svg viewBox="0 0 340 340" role="img" aria-label="Relógio de 24 horas com os sonos e mamadas de hoje">
+  return `<svg id="todayDial" viewBox="0 0 340 340" role="img" aria-label="Relógio de 24 horas com os sonos e mamadas de hoje. Toque num sono ou mamada para editar; toque num espaço vazio para adicionar.">
     <path d="${arc(cx, cy, r, 1140, 1440)}" stroke="var(--night)" stroke-width="22" fill="none"/>
     <path d="${arc(cx, cy, r, 0, 420)}" stroke="var(--night)" stroke-width="22" fill="none"/>
     <path d="${arc(cx, cy, r, 420, 1140)}" stroke="var(--surface)" stroke-width="22" fill="none"/>
@@ -451,6 +627,13 @@ function dialSVG(st) {
     ${segs}${dots}${ticks}${labels}
     <line x1="${hx.toFixed(1)}" y1="${hy.toFixed(1)}" x2="${hx2.toFixed(1)}" y2="${hy2.toFixed(1)}" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/>
   </svg>`;
+}
+function svgClickToMinutes(svgEl, clientX, clientY) {
+  const rect = svgEl.getBoundingClientRect();
+  const vbX = (clientX - rect.left) / rect.width * 340, vbY = (clientY - rect.top) / rect.height * 340;
+  let angle = Math.atan2(vbY - 170, vbX - 170) + Math.PI / 2;
+  if (angle < 0) angle += 2 * Math.PI;
+  return Math.round((angle / (2 * Math.PI)) * 1440);
 }
 
 function nextNapText(st) {
@@ -469,6 +652,7 @@ function nextNapText(st) {
 function renderToday() {
   const st = stats();
   const sleeping = !!S.live.sleepStart, feeding = !!S.live.feedStart;
+  const isPaused = sleeping && Array.isArray(S.live.pauses) && S.live.pauses.some(p => p.end == null);
   const ref = sleepRef(st.w);
   const h = st.sleep24 / 60;
   const scale = ref.max + 3;
@@ -476,6 +660,8 @@ function renderToday() {
   const nn = nextNapText(st);
   const nextSide = st.lastBreast ? (st.lastBreast.kind === "peito-e" ? "peito-d" : "peito-e") : null;
   const fr = feedRef(st.w);
+
+  const awakeLine = (!sleeping && st.lastSleep) ? `<p class="awake-line">Acordado há ${fmtDur((st.now - st.lastSleep.end) / MIN)}</p>` : "";
 
   let forgottenHTML = "";
   if (sleeping) {
@@ -499,16 +685,28 @@ function renderToday() {
   const lastFeedLine = feeding ? "Mamando agora" :
     st.lastFeed ? `Última há ${fmtDur((st.now - st.lastFeed.start) / MIN)} (${esc(KIND[st.lastFeed.kind] || "")})${nextSide ? ` · próximo: ${KIND[nextSide].toLowerCase()}` : ""}` : "Nenhuma mamada registrada";
 
+  const shortcutsHTML = `<div class="moreRow" role="group" aria-label="Mais registros">${getShortcuts().filter(s => s.visible).map(s => `<button data-shortcut="${esc(s.id)}">${esc(SHORTCUT_CATALOG[s.id].label)}</button>`).join("")}</div>`;
+
+  const lg = lastGrowth();
+  const growthLine = lg ? `<button class="rec" data-shortcut="growth"><span class="dot" style="background:var(--sleep)"></span><span class="t">${fmtTime(lg.measuredAt)}</span><span class="x">Última pesagem${lg.weightG ? ` · ${(lg.weightG / 1000).toFixed(2).replace(".", ",")} kg` : ""}${lg.heightCm ? ` · ${lg.heightCm} cm` : ""}</span></button>` : "";
+
+  const upcoming = upcomingAgenda();
+  const agendaHTML = upcoming.length ? `<h2>Próximos compromissos</h2>${upcoming.map(a => `<button class="agenda-item" data-agenda-edit="${esc(a.id)}"><span class="dot" style="background:var(--feed)"></span><span class="t">${fmtTime(a.scheduledAt)}</span><span class="x">${esc(AGENDA_KIND_LABEL[a.kind] || a.kind)}${a.title ? ` · ${esc(a.title)}` : ""}</span></button>`).join("")}` : "";
+
   $("#view-hoje").innerHTML = `
     ${forgottenHTML}
     <div class="dial-wrap">${dialSVG(st)}
       <button class="dial-center ${sleeping ? "sleeping" : ""}" id="btnSleep" aria-label="${sleeping ? "Registrar que acordou" : "Registrar que dormiu"}">
-        ${sleeping ? `<span class="sub">dormindo</span><span class="clock" data-timer="${S.live.sleepStart}">${fmtClock(st.now - S.live.sleepStart)}</span><span class="verb" style="font-size:1.05rem;margin-top:4px">Acordou</span>`
+        ${sleeping ? `<span class="sub">dormindo${isPaused ? " · pausado" : ""}</span><span class="clock" data-timer="${S.live.sleepStart}">${fmtClock(st.now - S.live.sleepStart)}</span><span class="verb" style="font-size:1.05rem;margin-top:4px">Acordou</span>`
                    : `<span class="verb">Dormiu</span><span class="sub">toque para iniciar</span>`}
       </button>
     </div>
-    ${sleeping ? `<button class="adjust" data-adjust="sleep">Adormeceu antes? Ajustar início</button><p class="safe">De barriga para cima, no berço, sem objetos soltos.</p>` : ""}
+    ${awakeLine}
+    ${sleeping ? `<button class="adjust" data-adjust="sleep">Adormeceu antes? Ajustar início</button>
+      <button class="adjust" id="btnPauseSleep">${isPaused ? "Retomar sono" : "Pausar (acordou um pouco)"}</button>
+      <p class="safe">De barriga para cima, no berço, sem objetos soltos.</p>` : ""}
     ${feedHTML}
+    ${shortcutsHTML}
     <section class="stats" aria-label="Resumo">
       <div class="stat"><span class="k">${nn.k}</span><span class="v">${nn.v}</span><span class="d">${nn.d}</span></div>
       <div class="stat"><span class="k">Sono nas últimas 24 h</span><span class="v">${fmtDur(st.sleep24)}</span>
@@ -518,6 +716,8 @@ function renderToday() {
       <div class="stat"><span class="k">Mamadas nas últimas 24 h</span><span class="v">${st.feedCount}</span>
         <span class="d">${lastFeedLine}${fr ? `<br><small style="color:var(--muted)">Referência para a idade: ${fr[0]}–${fr[1]} por dia</small>` : ""}</span></div>
     </section>
+    ${growthLine}
+    ${agendaHTML}
     <div class="actions"><button class="btn ghost" data-new>Adicionar registro passado</button></div>`;
 }
 
@@ -558,6 +758,25 @@ function renderWeek() {
 }
 
 /* ---------- render: records ---------- */
+function eventTitle(e) {
+  const isS = e.type === "sleep";
+  if (isS) {
+    const night = classifySleep(e.start, e.end || Date.now(), e.isNight, ...nightWindow());
+    const place = e.data && e.data.place;
+    const attempt = e.data && e.data.attempt;
+    let t = attempt === "failed" ? "Tentativa de soneca (não dormiu)" : `Sono ${night === "night" ? "noturno" : "(soneca)"} de ${fmtDur((e.end - e.start) / MIN)}`;
+    if (attempt === "moving") t += " · em movimento";
+    if (place) t += ` · ${PLACE_LABEL[place] || place}`;
+    return t;
+  }
+  if (e.type === "feed") return `${KIND[e.kind] || "Mamada"}${e.end ? ` · ${fmtDur((e.end - e.start) / MIN)}` : ""}${e.ml ? ` · ${e.ml} ml` : ""}${e.data && e.data.milkType ? ` · ${MILK_LABEL[e.data.milkType] || e.data.milkType}` : ""}`;
+  if (e.type === "pump") return `Extração${e.kind ? ` · ${KIND[e.kind] || e.kind}` : ""}${e.ml ? ` · ${e.ml} ml` : ""}`;
+  if (e.type === "diaper") return `Fralda · ${DIAPER_LABEL[e.kind] || e.kind || ""}`;
+  if (e.type === "medicine") return `Remédio${e.data && e.data.medicineName ? ` · ${e.data.medicineName}` : ""}${e.data && e.data.medicineDose ? ` · ${e.data.medicineDose}` : ""}`;
+  if (e.type === "bath") return "Banho";
+  if (e.type === "activity") return `Atividade${e.end ? ` · ${fmtDur((e.end - e.start) / MIN)}` : ""}`;
+  return e.type;
+}
 function renderRecords() {
   const ev = events().reverse();
   const groups = {};
@@ -569,11 +788,9 @@ function renderRecords() {
     html += `<div class="rec-day"><h3>${esc(dayLabel(groups[k][0].start))}</h3>`;
     for (const e of groups[k]) {
       const isS = e.type === "sleep";
-      const time = isS ? `${fmtTime(e.start)}–${fmtTime(e.end)}` : fmtTime(e.start);
-      const title = isS ? `Sono de ${fmtDur((e.end - e.start) / MIN)}` :
-        `${KIND[e.kind] || "Mamada"}${e.end ? ` · ${fmtDur((e.end - e.start) / MIN)}` : ""}${e.ml ? ` · ${e.ml} ml` : ""}`;
+      const time = e.end ? `${fmtTime(e.start)}–${fmtTime(e.end)}` : fmtTime(e.start);
       html += `<button class="rec" data-edit="${esc(e.id)}">${statusGlyph(e.id)}<span class="dot" style="background:var(${isS ? "--sleep" : "--feed"})"></span>
-        <span class="t">${time}</span><span class="x">${esc(title)}<small>${e.note ? esc(e.note) + " · " : ""}${e.by ? `por ${esc(nameFor(e))}` : ""}</small></span></button>`;
+        <span class="t">${time}</span><span class="x">${esc(eventTitle(e))}<small>${e.note ? esc(e.note) + " · " : ""}${e.by ? `por ${esc(nameFor(e))}` : ""}</small></span></button>`;
     }
     html += `</div>`;
   }
@@ -590,7 +807,7 @@ async function openTrash() {
   let html = rows.length ? "" : `<p class="empty">Nada na lixeira.</p>`;
   for (const r of rows) {
     const isS = r.type === "sleep";
-    const title = isS ? `Sono de ${r.end ? fmtDur((r.end - r.start) / MIN) : "?"}` : `${KIND[r.kind] || "Mamada"}`;
+    const title = eventTitle(rowToEvent(r));
     html += `<div class="rec" style="cursor:default"><span class="dot" style="background:var(${isS ? "--sleep" : "--feed"})"></span>
       <span class="t">${fmtTime(r.start)}</span><span class="x">${esc(title)}<small>apagado ${fmtTime(r.updated_at)}</small></span>
       <button class="btn ghost" data-restore="${esc(r.id)}" data-version="${r.version || 1}">Restaurar</button></div>`;
@@ -611,12 +828,15 @@ async function restoreEvent(id, expectedVersion) {
 async function exportBackup() {
   if (!sb) return;
   try {
-    const [evRes, babyRes, profRes] = await Promise.all([
+    const [evRes, babyRes, profRes, growthRes, agendaRes] = await Promise.all([
       sb.from("events").select("*").order("start"),
       sb.from("baby").select("*").eq("id", 1).maybeSingle(),
       sb.from("profiles").select("id,name"),
+      sb.from("sono_growth").select("*").order("measured_at"),
+      sb.from("sono_agenda").select("*").order("scheduled_at"),
     ]);
-    const payload = { exportedAt: new Date().toISOString(), events: evRes.data || [], baby: babyRes.data || null, profiles: profRes.data || [] };
+    const payload = { exportedAt: new Date().toISOString(), events: evRes.data || [], baby: babyRes.data || null,
+      profiles: profRes.data || [], growth: growthRes.data || [], agenda: agendaRes.data || [] };
     const filename = `sono-backup-${dayKey(Date.now())}.json`;
     const json = JSON.stringify(payload, null, 2);
     // No iPhone, a folha de compartilhamento é o jeito natural de salvar/mandar o arquivo;
@@ -724,20 +944,37 @@ window.addEventListener("pageshow", onForeground);
 window.addEventListener("focus", onForeground);
 window.addEventListener("online", onForeground);
 
-/* ---------- dialogs ---------- */
+/* ---------- dialogs: registro (sono/mamada/extração/fralda/remédio/banho/atividade) ---------- */
 function syncEventFields() {
   const t = $("#evType").value, k = $("#evKind").value;
   $("#evFeedKindWrap").hidden = t !== "feed";
-  $("#evEndWrap").hidden = t === "feed" && (k === "mamadeira" || k === "solido");
-  $("#evMlWrap").hidden = !(t === "feed" && k === "mamadeira");
+  $("#evMilkTypeWrap").hidden = !(t === "feed" && k === "mamadeira");
+  $("#evPumpSideWrap").hidden = t !== "pump";
+  $("#evDiaperKindWrap").hidden = t !== "diaper";
+  $("#evMedicineWrap").hidden = t !== "medicine";
+  $("#evPlaceWrap").hidden = t !== "sleep";
+  $("#evAttemptWrap").hidden = t !== "sleep";
+  $("#evNightWrap").hidden = t !== "sleep";
+  $("#evEndWrap").hidden = (t === "feed" && (k === "mamadeira" || k === "solido")) || t === "diaper" || t === "medicine";
+  $("#evMlWrap").hidden = !((t === "feed" && k === "mamadeira") || t === "pump");
   $('label[for="evEnd"]').textContent = t === "sleep" ? "Acordou às" : "Terminou às";
 }
 function openEvent(ev) {
   editing = ev && ev.id ? ev : null;
   const e = ev || { type: "sleep", start: Date.now() - HOUR, end: Date.now() };
+  const data = e.data || {};
   $("#evTitle").textContent = editing ? "Editar registro" : "Novo registro";
   $("#evType").value = e.type;
-  $("#evKind").value = e.kind || "peito-e";
+  $("#evKind").value = e.type === "feed" ? (e.kind || "peito-e") : "peito-e";
+  $("#evMilkType").value = data.milkType || "formula";
+  $("#evPumpSide").value = e.type === "pump" ? (e.kind || "peito-e") : "peito-e";
+  $("#evDiaperKind").value = e.type === "diaper" ? (e.kind || "xixi") : "xixi";
+  $("#evMedName").value = data.medicineName || "";
+  $("#evMedDose").value = data.medicineDose || "";
+  $("#evMedInterval").value = data.medicineIntervalHours || "";
+  $("#evPlace").value = data.place || "";
+  $("#evAttempt").value = data.attempt || "";
+  $("#evNight").value = e.isNight === true ? "night" : e.isNight === false ? "nap" : "auto";
   $("#evStart").value = toInput(e.start);
   $("#evEnd").value = e.end ? toInput(e.end) : (e.type === "sleep" ? toInput(Date.now()) : "");
   $("#evMl").value = e.ml || "";
@@ -748,6 +985,9 @@ function openEvent(ev) {
 }
 $("#evType").addEventListener("change", syncEventFields);
 $("#evKind").addEventListener("change", syncEventFields);
+document.querySelectorAll(".qbtn").forEach(b => b.addEventListener("click", () => {
+  $("#evStart").value = toInput(offsetFromNow(Date.now(), Number(b.dataset.quick)));
+}));
 $("#formEvent").addEventListener("submit", ev => {
   const type = $("#evType").value, kind = $("#evKind").value;
   const start = fromInput($("#evStart").value);
@@ -763,9 +1003,47 @@ $("#formEvent").addEventListener("submit", ev => {
     if (dur.needsConfirm && !confirm(`Duração de ${fmtDur((end - start) / MIN)} — confirma?`)) { ev.preventDefault(); return; }
   }
   const rec = { id: editing ? editing.id : uidGen(), type, start };
-  if (type === "sleep") rec.end = end;
-  else { rec.kind = kind; if (!$("#evEndWrap").hidden && end) rec.end = end; if (kind === "mamadeira" && $("#evMl").value) rec.ml = Number($("#evMl").value); }
+  const data = {};
+  if (type === "sleep") {
+    rec.end = end;
+    const place = $("#evPlace").value; if (place) data.place = place;
+    const attempt = $("#evAttempt").value; if (attempt) data.attempt = attempt;
+    const nightSel = $("#evNight").value;
+    rec.isNight = nightSel === "night" ? true : nightSel === "nap" ? false : null;
+    if (editing && editing.data && editing.data.pauses) data.pauses = editing.data.pauses;
+  } else if (type === "feed") {
+    rec.kind = kind;
+    if (!$("#evEndWrap").hidden && end) rec.end = end;
+    if (kind === "mamadeira") {
+      if ($("#evMl").value) rec.ml = Number($("#evMl").value);
+      const milk = $("#evMilkType").value; if (milk) data.milkType = milk;
+    }
+  } else if (type === "pump") {
+    rec.kind = $("#evPumpSide").value;
+    if (end) rec.end = end;
+    if ($("#evMl").value) rec.ml = Number($("#evMl").value);
+  } else if (type === "diaper") {
+    rec.kind = $("#evDiaperKind").value;
+  } else if (type === "medicine") {
+    const name = $("#evMedName").value.trim(); if (name) data.medicineName = name;
+    const dose = $("#evMedDose").value.trim(); if (dose) data.medicineDose = dose;
+    const interval = $("#evMedInterval").value; if (interval) data.medicineIntervalHours = Number(interval);
+  } else if (end) { rec.end = end; } // bath/activity
   const note = $("#evNote").value.trim(); if (note) rec.note = note;
+  rec.data = data;
+
+  if (type === "sleep" && end) {
+    const hit = findSleepOverlap(events(), start, end, editing ? editing.id : null);
+    if (hit) {
+      ev.preventDefault();
+      pendingSave = { rec, isEdit: !!editing, expectedVersion: editing ? editing.version : null };
+      pendingOverlapId = hit.id; pendingOverlapVersion = hit.version || 1;
+      $("#collisionText").textContent = `Já existe um sono de ${fmtTime(hit.start)}${hit.end ? `–${fmtTime(hit.end)}` : ""} registrado nesse horário.`;
+      $("#dlgEvent").close();
+      $("#dlgCollision").showModal();
+      return;
+    }
+  }
   if (editing) { rec.by = editing.by || null; putEditedEvent(rec, editing.version || 1); }
   else putNewEvent(rec);
   toast(editing ? "Registro atualizado." : "Registro salvo.");
@@ -775,6 +1053,90 @@ $("#evDelete").addEventListener("click", () => {
   if (!editing) return;
   deleteEvent(editing.id);
   $("#dlgEvent").close(); editing = null;
+});
+
+/* ---------- colisão de sono ---------- */
+function finalizeSleepSave(save) {
+  if (!save) return;
+  if (save.isEdit) putEditedEvent(save.rec, save.expectedVersion);
+  else putNewEvent(save.rec);
+  toast(save.isEdit ? "Registro atualizado." : "Registro salvo.");
+}
+$("#btnCollisionCancel").addEventListener("click", () => { $("#dlgCollision").close(); pendingSave = null; });
+$("#btnCollisionEdit").addEventListener("click", () => {
+  $("#dlgCollision").close();
+  const ov = S.ev[pendingOverlapId]; pendingSave = null;
+  if (ov) openEvent(ov);
+});
+$("#btnCollisionReplace").addEventListener("click", () => {
+  $("#dlgCollision").close();
+  if (pendingOverlapId) deleteEventNow(pendingOverlapId, pendingOverlapVersion);
+  finalizeSleepSave(pendingSave);
+  pendingSave = null;
+});
+
+/* ---------- dialogs: crescimento ---------- */
+function openGrowth(g) {
+  editingGrowth = g && g.id ? g : null;
+  const row = g || { measuredAt: Date.now() };
+  $("#grwTitle").textContent = editingGrowth ? "Editar crescimento" : "Crescimento";
+  $("#grwWhen").value = toInput(row.measuredAt || Date.now());
+  $("#grwWeight").value = row.weightG || "";
+  $("#grwHeight").value = row.heightCm || "";
+  $("#grwHead").value = row.headCm || "";
+  $("#grwNote").value = row.note || "";
+  $("#grwDelete").hidden = !editingGrowth;
+  $("#dlgGrowth").showModal();
+}
+$("#formGrowth").addEventListener("submit", ev => {
+  const when = fromInput($("#grwWhen").value);
+  if (!when || isNaN(when)) { ev.preventDefault(); toast("Informe a data e hora."); return; }
+  const rec = { id: editingGrowth ? editingGrowth.id : uidGen(), measuredAt: when,
+    weightG: $("#grwWeight").value ? Number($("#grwWeight").value) : null,
+    heightCm: $("#grwHeight").value ? Number($("#grwHeight").value) : null,
+    headCm: $("#grwHead").value ? Number($("#grwHead").value) : null,
+    note: $("#grwNote").value.trim() || null };
+  if (editingGrowth) putEditedGrowth(rec, editingGrowth.version || 1);
+  else putNewGrowth(rec);
+  toast(editingGrowth ? "Atualizado." : "Registro salvo.");
+  editingGrowth = null;
+});
+$("#grwDelete").addEventListener("click", () => {
+  if (!editingGrowth) return;
+  deleteGrowthNow(editingGrowth.id, editingGrowth.version || 1);
+  $("#dlgGrowth").close(); editingGrowth = null; toast("Apagado.");
+});
+
+/* ---------- dialogs: agenda ---------- */
+function openAgenda(a) {
+  editingAgenda = a && a.id ? a : null;
+  const row = a || { kind: "consulta", scheduledAt: Date.now() + HOUR };
+  $("#agTitle2").textContent = editingAgenda ? "Editar agenda" : "Agenda";
+  $("#agKind").value = row.kind || "consulta";
+  $("#agTitleInput").value = row.title || "";
+  $("#agWhen").value = toInput(row.scheduledAt);
+  $("#agDuration").value = row.durationMin || "";
+  $("#agNote").value = row.note || "";
+  $("#agDelete").hidden = !editingAgenda;
+  $("#dlgAgenda").showModal();
+}
+$("#formAgenda").addEventListener("submit", ev => {
+  const when = fromInput($("#agWhen").value);
+  const title = $("#agTitleInput").value.trim();
+  if (!title) { ev.preventDefault(); toast("Dê um título ao compromisso."); return; }
+  if (!when || isNaN(when)) { ev.preventDefault(); toast("Informe a data e hora."); return; }
+  const rec = { id: editingAgenda ? editingAgenda.id : uidGen(), kind: $("#agKind").value, title, scheduledAt: when,
+    durationMin: $("#agDuration").value ? Number($("#agDuration").value) : null,
+    note: $("#agNote").value.trim() || null, completed: editingAgenda ? editingAgenda.completed : false };
+  if (editingAgenda) putEditedAgenda(rec, editingAgenda.version || 1);
+  else putNewAgenda(rec);
+  toast(editingAgenda ? "Atualizado." : "Agenda salva.");
+  editingAgenda = null;
+});
+$("#agDelete").addEventListener("click", () => {
+  if (!editingAgenda) return;
+  deleteAgendaNow(editingAgenda.id, editingAgenda.version || 1);
+  $("#dlgAgenda").close(); editingAgenda = null; toast("Apagado.");
 });
 
 function openAdjust(which) {
@@ -791,19 +1153,23 @@ $("#formAdjust").addEventListener("submit", ev => {
   else setLive({ ...S.live, feedStart: t });
 });
 
+/* ---------- configurações ---------- */
 function openSettingsDialog() {
   $("#cfgName").value = S.config.name || "";
   $("#cfgBirth").value = S.config.birth || "";
   $("#cfgDeviceName").value = S.deviceName || "";
   $("#cfgTheme").value = (() => { try { return localStorage.getItem("sono-theme") || "auto"; } catch { return "auto"; } })();
+  renderShortcutsConfig();
   $("#dlgSettings").showModal();
 }
 $("#btnSettings").addEventListener("click", openSettingsDialog);
 $("#formSettings").addEventListener("submit", () => {
+  const wasFirstDeviceName = !S.deviceName;
   const theme = $("#cfgTheme").value; applyTheme(theme); try { localStorage.setItem("sono-theme", theme); } catch {}
   const deviceName = $("#cfgDeviceName").value.trim();
   S.deviceName = deviceName; store.setMeta("deviceName", deviceName);
   setConfig({ name: $("#cfgName").value.trim() || "Bebê", birth: $("#cfgBirth").value });
+  if (wasFirstDeviceName && deviceName && !S.onboardingDone) showOnboarding();
 });
 function applyTheme(t) { if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
 try { applyTheme(localStorage.getItem("sono-theme") || "auto"); } catch {}
@@ -816,12 +1182,49 @@ $("#btnCopyDiag").addEventListener("click", async () => {
   catch { toast("Não foi possível copiar automaticamente — selecione o texto e copie manualmente."); }
 });
 
-/* ---------- delegated clicks ---------- */
+/* ---------- onboarding (3 telas, uma vez) ---------- */
+function showOnboarding() {
+  obStep = 0; renderOnboardingScreen(); $("#dlgOnboarding").showModal();
+}
+function renderOnboardingScreen() {
+  const s = ONBOARDING_SCREENS[obStep];
+  const dots = ONBOARDING_SCREENS.map((_, i) => `<span class="${i === obStep ? "on" : ""}"></span>`).join("");
+  $("#obScreen").innerHTML = `<div class="ob-screen"><h2>${esc(s.title)}</h2><p>${s.body}</p><div class="ob-dots">${dots}</div></div>`;
+  $("#btnObNext").textContent = obStep === ONBOARDING_SCREENS.length - 1 ? "Entendi" : "Próximo";
+}
+function finishOnboarding() {
+  S.onboardingDone = true; store.setMeta("onboardingDone", true);
+  $("#dlgOnboarding").close();
+}
+$("#btnObNext").addEventListener("click", () => {
+  if (obStep >= ONBOARDING_SCREENS.length - 1) { finishOnboarding(); return; }
+  obStep++; renderOnboardingScreen();
+});
+$("#btnObSkip").addEventListener("click", finishOnboarding);
+
+/* ---------- delegated clicks/changes ---------- */
 document.addEventListener("click", e => {
+  const evEl = e.target.closest("[data-event-id]");
+  if (evEl) { const found = S.ev[evEl.dataset.eventId]; if (found) openEvent(found); return; }
+  const svg = e.target.closest("#todayDial");
+  if (svg && S.tab === "hoje" && !document.querySelector("dialog[open]")) {
+    const mins = svgClickToMinutes(svg, e.clientX, e.clientY);
+    const t0 = midnight(Date.now());
+    let t = t0 + mins * MIN; if (t > Date.now()) t -= DAY;
+    openEvent({ type: "sleep", start: t, end: Math.min(t + HOUR, Date.now()) });
+    return;
+  }
+  const up = e.target.closest("[data-sc-up]"); if (up) { moveShortcut(up.dataset.scUp, -1); return; }
+  const down = e.target.closest("[data-sc-down]"); if (down) { moveShortcut(down.dataset.scDown, 1); return; }
+  const agEdit = e.target.closest("[data-agenda-edit]");
+  if (agEdit) { const a = S.agenda[agEdit.dataset.agendaEdit]; if (a) openAgenda(a); return; }
+
   const t = e.target.closest("button"); if (!t) return;
   if (t.id === "btnSleep") return toggleSleep();
   if (t.id === "btnStopFeed") return stopFeed();
+  if (t.id === "btnPauseSleep") return togglePause();
   if (t.dataset.feed) return startFeed(t.dataset.feed);
+  if (t.dataset.shortcut) return openShortcut(t.dataset.shortcut);
   if (t.dataset.adjust) return openAdjust(t.dataset.adjust);
   if (t.hasAttribute("data-new")) return openEvent(null);
   if (t.dataset.edit) { const ev = events().find(x => x.id === t.dataset.edit); if (ev) openEvent(ev); return; }
@@ -829,6 +1232,10 @@ document.addEventListener("click", e => {
   if (t.id === "btnTrash") return openTrash();
   if (t.dataset.restore) return restoreEvent(t.dataset.restore, Number(t.dataset.version || 1));
   if (t.dataset.tab) { S.tab = t.dataset.tab; render(); window.scrollTo(0, 0); }
+});
+document.addEventListener("change", e => {
+  const cb = e.target.closest("[data-sc-visible]");
+  if (cb) setShortcutVisible(cb.dataset.scVisible, cb.checked);
 });
 
 /* ---------- realtime + polling adaptativo ---------- */
@@ -840,6 +1247,8 @@ function subscribeRealtime() {
   channelRef = sb.channel("sono-sync")
     .on("postgres_changes", { event: "*", schema: "public", table: "events" }, () => sync())
     .on("postgres_changes", { event: "*", schema: "public", table: "live_state" }, () => sync())
+    .on("postgres_changes", { event: "*", schema: "public", table: "sono_growth" }, () => sync())
+    .on("postgres_changes", { event: "*", schema: "public", table: "sono_agenda" }, () => sync())
     .subscribe(status => {
       realtimeStatus = status;
       if (status === "SUBSCRIBED") {
@@ -910,6 +1319,7 @@ function boot() {
       // Conta única compartilhada entre os dois iPhones: sem nome de aparelho definido,
       // não dá pra saber depois "quem" fez o quê — pede logo na primeira abertura.
       if (!S.deviceName) openSettingsDialog();
+      else if (!S.onboardingDone) showOnboarding();
     } else { S.uid = null; showLogin(); }
   });
   subscribeRealtime();

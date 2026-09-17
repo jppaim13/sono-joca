@@ -67,6 +67,19 @@ header.top{display:flex;align-items:center;justify-content:space-between;gap:12p
 .feedbar{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0 6px}
 .feedbar button{border:1px solid var(--line);background:var(--surface);border-radius:14px;padding:12px 6px;font-weight:700;min-height:52px}
 .feedbar button.hint{border-color:var(--feed);box-shadow:inset 0 0 0 1px var(--feed)}
+.moreRow{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:8px;margin:10px 0}
+.moreRow button{border:1px solid var(--line);background:var(--surface);border-radius:14px;padding:10px 4px;font-size:.82rem;font-weight:700;min-height:52px}
+.qrow{display:flex;gap:6px;margin:6px 0}
+.qrow .qbtn{flex:1;padding:10px 4px;min-height:44px;font-size:.9rem}
+.awake-line{color:var(--muted);font-size:.92rem;text-align:center;margin:4px 0 0}
+.shortcut-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
+.shortcut-row span{flex:1}
+.shortcut-row button{border:1px solid var(--line);background:var(--surface);border-radius:8px;width:36px;height:36px;flex:none}
+.agenda-item{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:6px 0;width:100%;text-align:left}
+.ob-screen h2{margin-top:0}
+.ob-dots{display:flex;gap:6px;justify-content:center;margin-top:14px}
+.ob-dots span{width:7px;height:7px;border-radius:50%;background:var(--line)}
+.ob-dots span.on{background:var(--sleep)}
 .feeding{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--feed-soft);border-radius:16px;padding:14px 16px;margin:18px 0 6px}
 .feeding .clock{font-family:var(--display);font-size:1.6rem;font-variant-numeric:tabular-nums}
 .btn{border:none;border-radius:12px;padding:12px 18px;font-weight:700;min-height:46px}
@@ -212,10 +225,43 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 <dialog id="dlgEvent"><form method="dialog" id="formEvent">
   <h2 id="evTitle">Novo registro</h2>
   <label for="evType">Tipo</label>
-  <select id="evType"><option value="sleep">Sono</option><option value="feed">Mamada ou refeição</option></select>
+  <select id="evType">
+    <option value="sleep">Sono</option>
+    <option value="feed">Mamada ou refeição</option>
+    <option value="pump">Extração de leite</option>
+    <option value="diaper">Fralda</option>
+    <option value="medicine">Remédio</option>
+    <option value="bath">Banho</option>
+    <option value="activity">Atividade (tummy time etc.)</option>
+  </select>
   <div id="evFeedKindWrap"><label for="evKind">Como</label>
     <select id="evKind"><option value="peito-e">Peito esquerdo</option><option value="peito-d">Peito direito</option><option value="mamadeira">Mamadeira</option><option value="solido">Comida</option></select></div>
-  <label for="evStart">Início</label><input type="datetime-local" id="evStart" required>
+  <div id="evMilkTypeWrap"><label for="evMilkType">Tipo de leite</label>
+    <select id="evMilkType"><option value="formula">Fórmula</option><option value="materno">Materno ordenhado</option><option value="misto">Misto</option></select></div>
+  <div id="evPumpSideWrap"><label for="evPumpSide">Lado</label>
+    <select id="evPumpSide"><option value="peito-e">Esquerdo</option><option value="peito-d">Direito</option></select></div>
+  <div id="evDiaperKindWrap"><label for="evDiaperKind">Tipo</label>
+    <select id="evDiaperKind"><option value="xixi">Xixi</option><option value="coco">Cocô</option><option value="ambos">Ambos</option></select></div>
+  <div id="evMedicineWrap">
+    <label for="evMedName">Remédio</label><input id="evMedName" maxlength="60" placeholder="Nome">
+    <label for="evMedDose">Dose</label><input id="evMedDose" maxlength="40" placeholder="ex.: 5 ml">
+    <label for="evMedInterval">Repetir a cada quantas horas (opcional)</label>
+    <input type="number" id="evMedInterval" min="1" max="48" inputmode="numeric">
+  </div>
+  <div id="evPlaceWrap"><label for="evPlace">Onde dormiu</label>
+    <select id="evPlace"><option value="">Não informado</option><option value="berco">Berço</option><option value="colo">Colo</option><option value="carrinho">Carrinho</option><option value="carro">Carro</option><option value="sling">Sling</option></select></div>
+  <div id="evAttemptWrap"><label for="evAttempt">Como foi</label>
+    <select id="evAttempt"><option value="">Dormiu normalmente</option><option value="failed">Tentei e não dormiu</option><option value="moving">Cochilou em movimento</option></select></div>
+  <div id="evNightWrap"><label for="evNight">Classificação</label>
+    <select id="evNight"><option value="auto">Automática</option><option value="night">Marcar como sono noturno</option><option value="nap">Marcar como soneca</option></select></div>
+  <label for="evStart">Início</label>
+  <div class="qrow">
+    <button type="button" class="btn ghost qbtn" data-quick="0">Agora</button>
+    <button type="button" class="btn ghost qbtn" data-quick="5">−5</button>
+    <button type="button" class="btn ghost qbtn" data-quick="10">−10</button>
+    <button type="button" class="btn ghost qbtn" data-quick="15">−15</button>
+  </div>
+  <input type="datetime-local" id="evStart" required>
   <div id="evEndWrap"><label for="evEnd">Fim</label><input type="datetime-local" id="evEnd"></div>
   <div id="evMlWrap"><label for="evMl">Quantidade (ml)</label><input type="number" id="evMl" min="0" step="5" inputmode="numeric"></div>
   <label for="evNote">Observação</label><input id="evNote" maxlength="200" placeholder="Opcional">
@@ -226,6 +272,61 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
     <button type="submit" class="btn primary">Salvar</button>
   </div>
 </form></dialog>
+
+<dialog id="dlgCollision">
+  <div class="dbody">
+    <h2>Já existe um sono nesse horário</h2>
+    <p id="collisionText" style="color:var(--muted)"></p>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="btnCollisionCancel">Cancelar</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn ghost" id="btnCollisionEdit">Editar existente</button>
+      <button type="button" class="btn primary" id="btnCollisionReplace">Substituir</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="dlgGrowth"><form method="dialog" id="formGrowth">
+  <h2 id="grwTitle">Crescimento</h2>
+  <label for="grwWhen">Quando</label><input type="datetime-local" id="grwWhen" required>
+  <label for="grwWeight">Peso (g)</label><input type="number" id="grwWeight" min="0" max="30000" inputmode="numeric" placeholder="ex.: 4200">
+  <label for="grwHeight">Altura (cm)</label><input type="number" id="grwHeight" min="0" max="150" step="0.1" inputmode="decimal">
+  <label for="grwHead">Perímetro cefálico (cm)</label><input type="number" id="grwHead" min="0" max="60" step="0.1" inputmode="decimal">
+  <label for="grwNote">Observação</label><input id="grwNote" maxlength="200" placeholder="Opcional">
+  <div class="actions">
+    <button type="button" class="btn danger" id="grwDelete" hidden>Apagar</button>
+    <span class="spacer"></span>
+    <button type="button" class="btn ghost" data-close>Cancelar</button>
+    <button type="submit" class="btn primary">Salvar</button>
+  </div>
+</form></dialog>
+
+<dialog id="dlgAgenda"><form method="dialog" id="formAgenda">
+  <h2 id="agTitle2">Agenda</h2>
+  <label for="agKind">Tipo</label>
+  <select id="agKind"><option value="consulta">Consulta</option><option value="vacina">Vacina</option><option value="banho">Banho</option><option value="passeio">Passeio</option><option value="outro">Outro</option></select>
+  <label for="agTitleInput">Título</label><input id="agTitleInput" maxlength="80" required>
+  <label for="agWhen">Quando</label><input type="datetime-local" id="agWhen" required>
+  <label for="agDuration">Duração (min, opcional)</label><input type="number" id="agDuration" min="0" max="1440" inputmode="numeric">
+  <label for="agNote">Observação</label><input id="agNote" maxlength="200" placeholder="Opcional">
+  <div class="actions">
+    <button type="button" class="btn danger" id="agDelete" hidden>Apagar</button>
+    <span class="spacer"></span>
+    <button type="button" class="btn ghost" data-close>Cancelar</button>
+    <button type="submit" class="btn primary">Salvar</button>
+  </div>
+</form></dialog>
+
+<dialog id="dlgOnboarding">
+  <div class="dbody">
+    <div id="obScreen"></div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="btnObSkip">Pular</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn primary" id="btnObNext">Próximo</button>
+    </div>
+  </div>
+</dialog>
 
 <dialog id="dlgAdjust"><form method="dialog" id="formAdjust">
   <h2 id="adjTitle">Ajustar início</h2>
@@ -243,6 +344,8 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   <label for="cfgBirth">Data de nascimento</label><input type="date" id="cfgBirth">
   <label for="cfgTheme">Aparência</label>
   <select id="cfgTheme"><option value="auto">Seguir o celular</option><option value="dark">Sempre escura (melhor à noite)</option><option value="light">Sempre clara</option></select>
+  <label>Atalhos da tela Hoje</label>
+  <div id="cfgShortcuts"></div>
   <div class="actions">
     <button type="button" class="btn ghost" id="btnExportBackup">Exportar backup</button>
     <button type="button" class="btn ghost" id="btnDiagnostics">Diagnóstico</button>

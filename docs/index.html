@@ -4,16 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sono do Joaquim</title>
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#10151F">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Sono">
-<link rel="apple-touch-icon" href="/icons/icon-180.png">
-<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Outfit:wght@300;500;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
 :root{
   --bg:#EEF2F0; --surface:#FFFFFF; --ink:#1D2A38; --muted:#5E6B78; --line:#D6DEDB;
@@ -138,6 +139,7 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 .login p{color:var(--muted);margin:0 0 12px}
 .login .btn{width:100%;margin-top:18px}
 .login .error{color:var(--warn);min-height:1.5em;margin-top:10px}
+.login .sent{color:var(--ok);margin-top:14px}
 [hidden]{display:none!important}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -145,13 +147,13 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 <body>
 <section class="wrap login" id="login" hidden>
   <h1>Sono do bebê</h1>
-  <p>Entre com a conta criada para você.</p>
+  <p>Entre com o e-mail cadastrado para você. Vamos enviar um link de acesso.</p>
   <form id="formLogin">
-    <label for="loginEmail">E-mail</label><input type="email" id="loginEmail" autocomplete="username" required>
-    <label for="loginPass">Senha</label><input type="password" id="loginPass" autocomplete="current-password" required>
-    <button type="submit" class="btn primary">Entrar</button>
+    <label for="loginEmail">E-mail</label><input type="email" id="loginEmail" autocomplete="email" required>
+    <button type="submit" class="btn primary">Enviar link de acesso</button>
     <p class="error" id="loginError" role="alert"></p>
   </form>
+  <p class="sent" id="loginSent" hidden>Link enviado. Abra seu e-mail neste aparelho para entrar.</p>
 </section>
 <div class="wrap" id="app">
   <header class="top">
@@ -212,8 +214,14 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 
 <script>
 (() => {
-const MIN = 60000, HOUR = 60*MIN, DAY = 24*HOUR;
+const MIN = 60000, HOUR = 60*MIN, DAY = 24*HOUR, HISTORY_DAYS = 60;
 const KIND = {"peito-e":"Peito esquerdo","peito-d":"Peito direito","mamadeira":"Mamadeira","solido":"Comida"};
+
+/* ---------- Supabase ---------- */
+const SUPABASE_URL = "https://lozveygdolwouekvxwkz.supabase.co";
+const SUPABASE_ANON_KEY = "COLE_A_ANON_KEY_AQUI";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const S = { config:{name:"Joaquim",birth:""}, live:{}, ev:{}, users:{}, since:0, uid:null, tab:"hoje", online:true };
 let editing = null, adjusting = null;
 const $ = s => document.querySelector(s);
@@ -264,8 +272,8 @@ function wakeRef(w){
 }
 const feedRef = w => (w == null || w < 17) ? [8,12] : null;
 
-/* ---------- data (API + cache offline) ---------- */
-const CACHE_KEY = "sono-cache-v2", QUEUE_KEY = "sono-queue-v2";
+/* ---------- data (Supabase + cache offline) ---------- */
+const CACHE_KEY = "sono-cache-v3", QUEUE_KEY = "sono-queue-v3";
 const loadJSON = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch { return d; } };
 const saveJSON = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 function persist(){ saveJSON(CACHE_KEY, {ev:S.ev, users:S.users, since:S.since, live:S.live, config:S.config, uid:S.uid}); }
@@ -276,22 +284,24 @@ function events(){
 const sleeps = () => events().filter(e => e.type === "sleep" && e.end);
 const feeds = () => events().filter(e => e.type === "feed");
 
-async function api(method, url, body){
-  let r;
+const rowToEvent = r => { const e = {id:r.id, type:r.type, start:r.start};
+  if (r.kind) e.kind = r.kind; if (r.end) e.end = r.end; if (r.ml != null) e.ml = r.ml;
+  if (r.note) e.note = r.note; if (r.by_user_id) e.by = r.by_user_id; if (r.deleted) e.deleted = true;
+  return e; };
+
+async function flushOp(op){
+  let res;
   try {
-    r = await fetch(url, {method, credentials:"same-origin",
-      headers:{"Content-Type":"application/json","X-Requested-With":"sono"},
-      body: body ? JSON.stringify(body) : undefined});
+    res = op.kind === "upsert" ? await sb.from(op.table).upsert(op.row)
+                                : await sb.from(op.table).update(op.patch).eq("id", op.id);
   } catch { const e = new Error("offline"); e.offline = true; throw e; }
-  if (r.status === 401 && !url.endsWith("/login")) { showLogin(); const e = new Error("auth"); e.auth = true; throw e; }
-  if (!r.ok) { const e = new Error("http " + r.status); e.status = r.status;
-    try { e.msg = (await r.json()).error; } catch {} throw e; }
-  return r.status === 204 ? null : r.json();
+  if (res.error) { const e = new Error(res.error.message); e.pgError = res.error; throw e; }
 }
 
 let queue = loadJSON(QUEUE_KEY, []), flushing = false;
 function enqueueOp(op){
-  queue = queue.filter(q => q.url !== op.url);  // a última alteração do mesmo item vale
+  const key = op.table + ":" + (op.row ? op.row.id : op.id);
+  queue = queue.filter(q => (q.table + ":" + (q.row ? q.row.id : q.id)) !== key);
   queue.push(op); saveJSON(QUEUE_KEY, queue); updateBanner(); flush();
 }
 async function flush(){
@@ -299,9 +309,9 @@ async function flush(){
   try {
     while (queue.length){
       const op = queue[0];
-      try { await api(op.method, op.url, op.body); S.online = true; }
+      try { await flushOp(op); S.online = true; }
       catch (e) {
-        if (e.offline || e.auth || e.status >= 500 || e.status === 429) { S.online = !e.offline; break; }
+        if (e.offline) { S.online = false; break; }
         console.error(e); toast("O servidor recusou um registro com dados inválidos.");
       }
       queue.shift(); saveJSON(QUEUE_KEY, queue);
@@ -309,42 +319,57 @@ async function flush(){
   } finally { flushing = false; updateBanner(); }
 }
 async function sync(){
+  if (!S.uid) return;
   await flush();
-  if (queue.length) return;  // envia primeiro o que está pendente
+  if (queue.length) return;
   try {
-    const d = await api("GET", `/api/sync?since=${S.since}`);
-    for (const e of d.events) S.ev[e.id] = e;
-    const cutoff = Date.now() - 60*DAY;
-    for (const id in S.ev) if (S.ev[id].start < cutoff) delete S.ev[id];
-    S.users = d.users || {}; S.uid = d.me; S.live = d.live || {};
-    if (d.baby) S.config = {...S.config, ...d.baby};
-    S.since = Math.max(0, d.now - 5000); S.online = true;
-    persist(); hideLogin();
+    const cutoff = Date.now() - HISTORY_DAYS*DAY;
+    const [evRes, liveRes, babyRes, profRes] = await Promise.all([
+      sb.from("events").select("*").gt("updated_at", S.since).gte("start", cutoff).order("start"),
+      sb.from("live_state").select("*").eq("id",1).maybeSingle(),
+      sb.from("baby").select("*").eq("id",1).maybeSingle(),
+      sb.from("profiles").select("id,name"),
+    ]);
+    for (const r of [evRes, liveRes, babyRes, profRes]) if (r.error) throw r.error;
+    for (const r of evRes.data) S.ev[r.id] = rowToEvent(r);
+    const cut2 = Date.now() - HISTORY_DAYS*DAY;
+    for (const id in S.ev) if (S.ev[id].start < cut2) delete S.ev[id];
+    S.users = {}; for (const p of profRes.data) S.users[p.id] = p.name;
+    S.live = liveRes.data ? {sleepStart:liveRes.data.sleep_start, sleepBy:liveRes.data.sleep_by,
+      feedStart:liveRes.data.feed_start, feedKind:liveRes.data.feed_kind, feedBy:liveRes.data.feed_by} : {};
+    if (babyRes.data) S.config = {...S.config, name:babyRes.data.name, birth:babyRes.data.birth || ""};
+    S.since = Date.now() - 5000; S.online = true;
+    persist();
     if (!document.querySelector("dialog[open]")) render(); else updateBanner();
-  } catch (e) { if (e.offline) { S.online = false; updateBanner(); } }
+  } catch { S.online = false; updateBanner(); }
 }
-function clean(ev){ const c = {...ev}; delete c.id; delete c._key; delete c.by; delete c.deleted;
-  for (const k in c) if (c[k] === undefined || c[k] === "" || c[k] === null) delete c[k]; return c; }
 
 function putEvent(ev){
-  const body = clean(ev);
-  S.ev[ev.id] = {...body, id:ev.id, by: ev.by != null ? ev.by : S.uid};
+  const now = Date.now();
+  const row = { id:ev.id, type:ev.type, kind:ev.kind || null, start:ev.start, end:ev.end || null,
+    ml: ev.kind === "mamadeira" ? (ev.ml ?? null) : null, note: ev.note || null,
+    by_user_id: ev.by || S.uid, deleted:false, updated_at: now };
+  S.ev[ev.id] = rowToEvent(row);
   persist(); render();
-  enqueueOp({method:"PUT", url:`/api/events/${encodeURIComponent(ev.id)}`, body});
+  enqueueOp({kind:"upsert", table:"events", row});
 }
 function deleteEvent(id){
+  const now = Date.now();
   if (S.ev[id]) S.ev[id] = {...S.ev[id], deleted:true};
   persist(); render();
-  enqueueOp({method:"DELETE", url:`/api/events/${encodeURIComponent(id)}`});
+  enqueueOp({kind:"update", table:"events", id, patch:{deleted:true, updated_at:now}});
 }
 function setLive(obj){
-  const body = {sleepStart:obj.sleepStart||null, sleepBy:obj.sleepBy||null, feedStart:obj.feedStart||null, feedKind:obj.feedKind||null, feedBy:obj.feedBy||null};
-  S.live = body; persist(); render();
-  enqueueOp({method:"PUT", url:"/api/live", body});
+  const now = Date.now();
+  S.live = {sleepStart:obj.sleepStart||null, sleepBy:obj.sleepBy||null, feedStart:obj.feedStart||null, feedKind:obj.feedKind||null, feedBy:obj.feedBy||null};
+  persist(); render();
+  enqueueOp({kind:"upsert", table:"live_state", row:{id:1, sleep_start:S.live.sleepStart, sleep_by:S.live.sleepBy,
+    feed_start:S.live.feedStart, feed_kind:S.live.feedKind, feed_by:S.live.feedBy, updated_at:now}});
 }
 function setConfig(obj){
+  const now = Date.now();
   S.config = {...S.config, ...obj}; persist(); render();
-  enqueueOp({method:"PUT", url:"/api/baby", body:{name:S.config.name, birth:S.config.birth||""}});
+  enqueueOp({kind:"upsert", table:"baby", row:{id:1, name:S.config.name, birth:S.config.birth || null, updated_at:now}});
 }
 function updateBanner(){
   const b = $("#modeBanner");
@@ -354,18 +379,21 @@ function updateBanner(){
 }
 
 /* ---------- login ---------- */
-function showLogin(){ $("#login").hidden = false; $("#app").hidden = true; $("#tabs").hidden = true; }
+function showLogin(){ $("#login").hidden = false; $("#app").hidden = true; $("#tabs").hidden = true;
+  $("#formLogin").hidden = false; $("#loginSent").hidden = true; $("#loginEmail").value = ""; }
 function hideLogin(){ $("#login").hidden = true; $("#app").hidden = false; $("#tabs").hidden = false; }
 $("#formLogin").addEventListener("submit", async ev => {
   ev.preventDefault(); $("#loginError").textContent = "";
+  const email = $("#loginEmail").value.trim();
   try {
-    await api("POST", "/api/login", {email:$("#loginEmail").value, password:$("#loginPass").value});
-    $("#loginPass").value = ""; S.since = 0; S.ev = {}; await sync();
-  } catch (e) { $("#loginError").textContent = e.offline ? "Sem conexão com o servidor." : (e.msg || "Não foi possível entrar."); }
+    const { error } = await sb.auth.signInWithOtp({ email, options:{ emailRedirectTo: location.href.split("#")[0] } });
+    if (error) throw error;
+    $("#formLogin").hidden = true; $("#loginSent").hidden = false;
+  } catch { $("#loginError").textContent = "Não foi possível enviar o link. Confira o e-mail e sua conexão."; }
 });
 $("#btnLogout").addEventListener("click", async () => {
   if (queue.length && !confirm("Há alterações ainda não enviadas. Sair mesmo assim?")) return;
-  try { await api("POST", "/api/logout"); } catch {}
+  try { await sb.auth.signOut(); } catch {}
   queue = []; saveJSON(QUEUE_KEY, []); try { localStorage.removeItem(CACHE_KEY); } catch {}
   S.ev = {}; S.since = 0; S.uid = null; $("#dlgSettings").close(); showLogin();
 });
@@ -732,16 +760,28 @@ document.addEventListener("click", e => {
   if (t.dataset.tab){ S.tab = t.dataset.tab; render(); window.scrollTo(0,0); }
 });
 
+/* ---------- realtime ---------- */
+function subscribeRealtime(){
+  sb.channel("sono-sync")
+    .on("postgres_changes", {event:"*", schema:"public", table:"events"}, () => sync())
+    .on("postgres_changes", {event:"*", schema:"public", table:"live_state"}, () => sync())
+    .subscribe();
+}
+
 /* ---------- init ---------- */
 function init(){
   const c = loadJSON(CACHE_KEY, null);
   if (c) { S.ev = c.ev || {}; S.users = c.users || {}; S.since = c.since || 0; S.live = c.live || {};
     S.config = {...S.config, ...(c.config || {})}; S.uid = c.uid; }
   render();
-  sync();
-  setInterval(() => { if (!document.hidden) sync(); }, 15000);
+  sb.auth.onAuthStateChange((_event, session) => {
+    if (session) { S.uid = session.user.id; hideLogin(); sync(); }
+    else { S.uid = null; showLogin(); }
+  });
+  setInterval(() => { if (!document.hidden) sync(); }, 30000);
   window.addEventListener("online", sync);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
+  subscribeRealtime();
 }
 init();
 })();

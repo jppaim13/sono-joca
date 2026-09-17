@@ -1,8 +1,2 @@
-__pycache__/
-*.pyc
-.venv/
-venv/
-.env
-*.db
-instance/
 .DS_Store
+supabase/.temp/

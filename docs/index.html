@@ -344,6 +344,10 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   <label for="cfgBirth">Data de nascimento</label><input type="date" id="cfgBirth">
   <label for="cfgTheme">Aparência</label>
   <select id="cfgTheme"><option value="auto">Seguir o celular</option><option value="dark">Sempre escura (melhor à noite)</option><option value="light">Sempre clara</option></select>
+  <label for="cfgFixedNaps">Sonecas fixas por dia (opcional)</label>
+  <input type="number" id="cfgFixedNaps" min="0" max="10" inputmode="numeric" placeholder="Deixe em branco para automático">
+  <label for="cfgMinWake">Hora mínima de acordar (opcional, 0–23)</label>
+  <input type="number" id="cfgMinWake" min="0" max="23" inputmode="numeric" placeholder="ex.: 6">
   <label>Atalhos da tela Hoje</label>
   <div id="cfgShortcuts"></div>
   <div class="actions">

@@ -4,6 +4,7 @@ import { resolveWrite, resolveEditorName } from "./conflict.js";
 import { scheduleDelete, cancelDelete, isPending, isExpired, UNDO_WINDOW_MS } from "./undo.js";
 import { parseDigitsToTime, offsetFromNow } from "./timeinput.js";
 import { netSleepDuration, classifySleep, findSleepOverlap } from "./sleep.js";
+import { ageWakeWindowRef, dailySleepRefHours, computeSchedule } from "./schedule.js";
 import * as store from "./store.js";
 
 const APP_VERSION = "2026.09.17-fase1";
@@ -56,7 +57,6 @@ const uidGen = () => Date.now().toString(36) + Math.random().toString(36).slice(
 const dayLabel = ms => { const t = midnight(Date.now()); const d = midnight(ms);
   if (d === t) return "Hoje"; if (d === t - DAY) return "Ontem";
   return new Date(ms).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric", month: "short" }); };
-const median = a => { const s = [...a].sort((x, y) => x - y); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 function nightWindow() { const s = S.config.settings || {}; return [Number.isFinite(s.nightStart) ? s.nightStart : 19, Number.isFinite(s.nightEnd) ? s.nightEnd : 7]; }
 
 function toast(msg) {
@@ -89,22 +89,11 @@ function ageText(w) {
   const months = Math.floor(days / 30.44);
   return `${months} ${months === 1 ? "mês" : "meses"} (${Math.floor(w)} semanas)`;
 }
-function sleepRef(w) {
-  if (w == null || w < 17) return { min: 14, max: 17, src: "National Sleep Foundation, 0–3 meses" };
-  if (w < 52) return { min: 12, max: 16, src: "AASM/AAP, 4–12 meses (inclui sonecas)" };
-  if (w < 104) return { min: 11, max: 14, src: "AASM/AAP, 1–2 anos (inclui sonecas)" };
-  return { min: 10, max: 13, src: "AASM/AAP, 3–5 anos" };
-}
-function wakeRef(w) {
-  if (w == null || w < 4) return [35, 60];
-  if (w < 8) return [50, 80];
-  if (w < 12) return [60, 90];
-  if (w < 16) return [75, 120];
-  if (w < 26) return [105, 150];
-  if (w < 39) return [150, 195];
-  if (w < 52) return [180, 240];
-  return [240, 360];
-}
+// Fonte única de verdade das referências por idade agora é schedule.js (reaproveitado
+// também pelo motor de previsão) — mantém os mesmos nomes aqui para não mexer nos
+// muitos call-sites já existentes.
+const sleepRef = dailySleepRefHours;
+const wakeRef = ageWakeWindowRef;
 const feedRef = w => (w == null || w < 17) ? [8, 12] : null;
 
 /* ---------- local-first data ---------- */
@@ -434,6 +423,13 @@ function setConfig(obj) {
   S.config = { ...S.config, ...obj }; persistMeta(); render();
   enqueue({ kind: "upsert", table: "baby", row: { id: 1, name: S.config.name, birth: S.config.birth || null, settings: S.config.settings || {}, updated_at: now } });
 }
+// Dia atípico (doença, viagem, visita): exclui aquele dia do cálculo das janelas pessoais
+// do motor de previsão, sem apagar os registros.
+function toggleAtypicalDay(dayKeyStr) {
+  const current = (S.config.settings && S.config.settings.atypicalDays) || [];
+  const next = current.includes(dayKeyStr) ? current.filter(k => k !== dayKeyStr) : [...current, dayKeyStr];
+  setConfig({ settings: { ...S.config.settings, atypicalDays: next } });
+}
 
 /* ---------- setup (Supabase URL/key, fica só neste aparelho) ---------- */
 function showSetup() { $("#setup").hidden = false; $("#login").hidden = true; $("#app").hidden = true; $("#tabs").hidden = true; }
@@ -578,14 +574,10 @@ function stats() {
   const lastFeed = S.live.feedStart ? null : feeds().slice(-1)[0];
   const lastBreast = [...feeds()].reverse().find(f => f.kind === "peito-e" || f.kind === "peito-d");
 
-  const gaps = [];
-  for (let i = 1; i < sl.length; i++) { const g = (sl[i].start - sl[i - 1].end) / MIN;
-    if (sl[i - 1].end > now - 3 * DAY && g >= 10 && g <= 300) gaps.push(g); }
-  const [lo, hi] = wakeRef(w);
-  const personal = gaps.length >= 4 ? median(gaps) : null;
-  const target = personal == null ? (lo + hi) / 2 : Math.min(Math.max(personal, lo), hi * 1.15);
   const lastSleep = sl.slice(-1)[0];
-  return { now, w, sleep24: sleep24 / MIN, feedCount, lastFeed, lastBreast, lo, hi, personal, target, gaps: gaps.length, lastSleep };
+  const atypicalDays = (S.config.settings && S.config.settings.atypicalDays) || [];
+  const schedule = computeSchedule({ sleepEvents: sl, ageWeeks: w, settings: S.config.settings || {}, now, atypicalDayKeys: atypicalDays });
+  return { now, w, sleep24: sleep24 / MIN, feedCount, lastFeed, lastBreast, lastSleep, schedule };
 }
 function lastGrowth() {
   const list = Object.values(S.growth).filter(g => g && !g.deleted).sort((a, b) => b.measuredAt - a.measuredAt);
@@ -638,15 +630,24 @@ function svgClickToMinutes(svgEl, clientX, clientY) {
 
 function nextNapText(st) {
   if (S.live.sleepStart) return { k: "Dormindo desde", v: fmtTime(S.live.sleepStart), d: `Registrado por ${esc(nameFor({ ...S.live, by: S.live.sleepBy }))}` };
-  if (!st.lastSleep) return { k: "Próximo sono", v: "—", d: `Registre alguns sonos para as previsões aparecerem. Referência para a idade: acordado ${st.lo}–${st.hi} min.` };
-  const awake = (st.now - st.lastSleep.end) / MIN;
-  const from = st.lastSleep.end + (st.target - 10) * MIN, to = st.lastSleep.end + (st.target + 10) * MIN;
-  const basis = st.personal != null ? `baseado nos últimos dias (${fmtDur(st.personal)} em média)` : `referência da idade (${st.lo}–${st.hi} min)`;
+  const sch = st.schedule;
+  const [lo, hi] = sch.wakeWindowRef;
+  if (!sch.nextNap) return { k: "Próximo sono", v: "—", d: `Registre alguns sonos para as previsões aparecerem. Referência para a idade: acordado ${lo}–${hi} min.` };
+  const { from, to, awakeMin, status } = sch.nextNap;
   let tag;
-  if (awake < st.target - 10) tag = `<span class="tag">acordado há ${fmtDur(awake)}</span>`;
-  else if (awake <= st.target + 15) tag = `<span class="tag ok">boa hora para tentar</span>`;
-  else tag = `<span class="tag warn">acordado há ${fmtDur(awake)}, observe sinais de cansaço</span>`;
-  return { k: "Próximo sono provável", v: `${fmtTime(from)}–${fmtTime(to)}`, d: `${tag}<br><small style="color:var(--muted)">${basis}</small>` };
+  if (status === "early") tag = `<span class="tag">acordado há ${fmtDur(awakeMin)}</span>`;
+  else if (status === "good") tag = `<span class="tag ok">boa hora para tentar</span>`;
+  else tag = `<span class="tag warn">acordado há ${fmtDur(awakeMin)}, observe sinais de cansaço</span>`;
+  const calibLine = sch.calibration.ready ? "" :
+    ` · <span style="color:var(--muted)">calibrando (faltam ${sch.calibration.daysNeeded} dia${sch.calibration.daysNeeded > 1 ? "s" : ""})</span>`;
+  const newbornLine = sch.mode === "newborn"
+    ? `<br><small style="color:var(--muted)">Modo recém-nascido: só a próxima janela por enquanto — rotina por sonecas costuma fazer mais sentido a partir de 8–12 semanas.</small>` : "";
+  return {
+    k: sch.mode === "newborn" ? "Próxima janela provável" : "Próximo sono provável",
+    v: `${fmtTime(from)}–${fmtTime(to)}`,
+    d: `${tag}${calibLine}${newbornLine}<br><button type="button" class="linklike" id="btnWhySchedule" style="font-size:.82rem;margin-top:2px">Por que este horário?</button>
+      <p id="whyScheduleText" class="empty" style="display:none;font-size:.85rem;padding:2px 0 0;margin:0">${esc(sch.explain)}</p>`,
+  };
 }
 
 function renderToday() {
@@ -668,6 +669,7 @@ function renderToday() {
     const f = isSleepForgotten(S.live.sleepStart, st.now);
     if (f.forgotten) forgottenHTML = `<div class="banner warn-banner">Esqueceu de parar? Dormindo há ${fmtDur((st.now - S.live.sleepStart) / MIN)} · <button class="linklike" data-adjust="sleep">Ajustar</button></div>`;
   }
+  const suggestionHTML = st.schedule.suggestion ? `<div class="banner">${esc(st.schedule.suggestion.detail)}</div>` : "";
 
   let feedHTML;
   if (feeding) {
@@ -695,6 +697,7 @@ function renderToday() {
 
   $("#view-hoje").innerHTML = `
     ${forgottenHTML}
+    ${suggestionHTML}
     <div class="dial-wrap">${dialSVG(st)}
       <button class="dial-center ${sleeping ? "sleeping" : ""}" id="btnSleep" aria-label="${sleeping ? "Registrar que acordou" : "Registrar que dormiu"}">
         ${sleeping ? `<span class="sub">dormindo${isPaused ? " · pausado" : ""}</span><span class="clock" data-timer="${S.live.sleepStart}">${fmtClock(st.now - S.live.sleepStart)}</span><span class="verb" style="font-size:1.05rem;margin-top:4px">Acordou</span>`
@@ -784,8 +787,11 @@ function renderRecords() {
   let html = `<div class="actions" style="justify-content:space-between;align-items:center"><h2 style="margin:0">Registros</h2><button class="btn primary" data-new>Adicionar</button></div>`;
   const keys = Object.keys(groups);
   if (!keys.length) html += `<p class="empty">Nenhum registro ainda. Use o botão Dormiu na tela Hoje ou adicione um registro passado.</p>`;
+  const atypicalDays = (S.config.settings && S.config.settings.atypicalDays) || [];
   for (const k of keys) {
-    html += `<div class="rec-day"><h3>${esc(dayLabel(groups[k][0].start))}</h3>`;
+    const isAtyp = atypicalDays.includes(k);
+    html += `<div class="rec-day"><h3>${esc(dayLabel(groups[k][0].start))}
+      <button type="button" class="linklike" data-atypical="${esc(k)}" style="font-size:.75rem;font-weight:400">${isAtyp ? "Dia atípico ✓ (tocar para desmarcar)" : "Marcar como atípico"}</button></h3>`;
     for (const e of groups[k]) {
       const isS = e.type === "sleep";
       const time = e.end ? `${fmtTime(e.start)}–${fmtTime(e.end)}` : fmtTime(e.start);
@@ -1159,6 +1165,9 @@ function openSettingsDialog() {
   $("#cfgBirth").value = S.config.birth || "";
   $("#cfgDeviceName").value = S.deviceName || "";
   $("#cfgTheme").value = (() => { try { return localStorage.getItem("sono-theme") || "auto"; } catch { return "auto"; } })();
+  const settings = S.config.settings || {};
+  $("#cfgFixedNaps").value = settings.fixedNaps != null ? settings.fixedNaps : "";
+  $("#cfgMinWake").value = settings.minWakeHour != null ? settings.minWakeHour : "";
   renderShortcutsConfig();
   $("#dlgSettings").showModal();
 }
@@ -1168,7 +1177,10 @@ $("#formSettings").addEventListener("submit", () => {
   const theme = $("#cfgTheme").value; applyTheme(theme); try { localStorage.setItem("sono-theme", theme); } catch {}
   const deviceName = $("#cfgDeviceName").value.trim();
   S.deviceName = deviceName; store.setMeta("deviceName", deviceName);
-  setConfig({ name: $("#cfgName").value.trim() || "Bebê", birth: $("#cfgBirth").value });
+  const fixedNaps = $("#cfgFixedNaps").value ? Number($("#cfgFixedNaps").value) : null;
+  const minWakeHour = $("#cfgMinWake").value ? Number($("#cfgMinWake").value) : null;
+  setConfig({ name: $("#cfgName").value.trim() || "Bebê", birth: $("#cfgBirth").value,
+    settings: { ...S.config.settings, fixedNaps, minWakeHour } });
   if (wasFirstDeviceName && deviceName && !S.onboardingDone) showOnboarding();
 });
 function applyTheme(t) { if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
@@ -1219,10 +1231,14 @@ document.addEventListener("click", e => {
   const agEdit = e.target.closest("[data-agenda-edit]");
   if (agEdit) { const a = S.agenda[agEdit.dataset.agendaEdit]; if (a) openAgenda(a); return; }
 
+  const atyp = e.target.closest("[data-atypical]");
+  if (atyp) return toggleAtypicalDay(atyp.dataset.atypical);
+
   const t = e.target.closest("button"); if (!t) return;
   if (t.id === "btnSleep") return toggleSleep();
   if (t.id === "btnStopFeed") return stopFeed();
   if (t.id === "btnPauseSleep") return togglePause();
+  if (t.id === "btnWhySchedule") { const p = $("#whyScheduleText"); if (p) p.style.display = p.style.display === "none" ? "block" : "none"; return; }
   if (t.dataset.feed) return startFeed(t.dataset.feed);
   if (t.dataset.shortcut) return openShortcut(t.dataset.shortcut);
   if (t.dataset.adjust) return openAdjust(t.dataset.adjust);

@@ -1,10 +1,10 @@
 // Guarda a interface para abrir sem internet. Chamadas ao Supabase nunca são guardadas em cache.
 // Não pula a espera sozinho — só ativa quando o app pedir (ver "Nova versão disponível" no index.html),
 // pra não trocar de versão no meio de um registro.
-const CACHE = "sono-shell-v7";
+const CACHE = "sono-shell-v8";
 const SHELL = ["./", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png",
   "./js/app.js", "./js/time.js", "./js/validation.js", "./js/outbox.js", "./js/conflict.js", "./js/undo.js",
-  "./js/store.js", "./js/timeinput.js", "./js/sleep.js"];
+  "./js/store.js", "./js/timeinput.js", "./js/sleep.js", "./js/schedule.js"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));

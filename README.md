@@ -16,7 +16,7 @@ docs/               app do celular — é o que o GitHub Pages publica
   index.html         casca HTML/CSS, carrega js/app.js como módulo
   js/                lógica: app.js (render + Supabase) e módulos puros/testáveis
                       (time.js, validation.js, outbox.js, conflict.js, undo.js, store.js,
-                      timeinput.js, sleep.js)
+                      timeinput.js, sleep.js, schedule.js — motor de previsão)
   sw.js               service worker (cache do app shell + aviso de nova versão)
 supabase/
   schema.sql          foto atual completa do schema (tabelas + RLS + índices)
@@ -53,11 +53,15 @@ Feito:
   de evento, `data`/`is_night` em `events`, `settings` em `baby`, `pauses` em `live_state`, e as
   tabelas `sono_growth`/`sono_agenda`/`sono_journal`/`sono_push_subscriptions`/
   `sono_notification_prefs`/`sono_notification_log`/`sono_quick_tokens` com RLS.
+- **Fase 2 (motor de previsão)** implementada — ver
+  [Fase 2 — motor de previsão](#fase-2--motor-de-previsão) abaixo. Sem migração nova (usa as colunas
+  que a Fase 1 já criou).
 
 Pendente:
 - Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo
   definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
+- Fases 3–6 (push/atalhos, tendências, sons, agenda/conteúdo) — ainda não iniciadas.
 - Fases 2–6 (previsão, push/atalhos, tendências, sons, agenda/conteúdo) — ainda não iniciadas.
 
 **Detalhe importante para quem for mexer no banco:** o projeto Supabase usado
@@ -296,3 +300,81 @@ Além do checklist da Fase 0 acima, depois de rodar as migrações `003`/`004`:
    mesmo num alvo pequeno; se for difícil de acertar, é um ponto para revisar a área de toque depois.
 5. Testar o fluxo de colisão de sono nos dois aparelhos ao mesmo tempo (um cria um sono enquanto o outro
    edita um horário que colide) — não deve haver perda de dado, só o aviso de colisão.
+
+## Fase 2 — motor de previsão
+
+Todo o motor fica em `docs/js/schedule.js` — **puro**: nada de `Date.now()` implícito, `document` ou
+`localStorage` ali dentro, tudo recebe `now`/dados como parâmetro. Isso é proposital: a ideia é que a
+Fase 3 consiga importar o mesmo arquivo direto numa Edge Function (Deno) para calcular os lembretes
+("soneca em ~30 min") sem duplicar a lógica.
+
+**O que o motor faz:**
+- Calcula a janela de vigília típica por 3 posições no dia — **1ª**, **do meio** e **última antes da
+  noite** — não por posição numerada (1ª, 2ª, 3ª…), porque o número de sonecas varia dia a dia.
+- Por posição, usa a **mediana dos últimos 14 dias**, com mais peso para dias recentes
+  (`recencyWeight`, meia-vida de 5 dias), outliers descartados (IQR) e o resultado sempre limitado
+  (clamp) à faixa de referência da idade — nunca sai muito da faixa mesmo com poucos dados estranhos.
+- **Calibração**: precisa de pelo menos 3 "dias completos" (uma noite → sonecas → próxima noite, sem
+  contar dias marcados como atípicos) para sair do modo automático puro pela idade; a partir daí a
+  confiança sobe (baixa/média/alta) conforme mais dias se acumulam.
+- **Modo recém-nascido**: ativa sozinho se a idade for menor que 8 semanas OU a calibração ainda não
+  estiver pronta — mostra só a próxima janela prevista, sem tentar montar um plano do dia inteiro (é
+  o caso do Joaquim agora).
+- **Ajustes de contexto**: soneca anterior curta (<45 min) ou marcada como "em movimento"/"tentei e não
+  dormiu" encurta a próxima janela; acordar antes da "hora mínima" configurada conta como noite
+  incompleta e também encurta a 1ª janela do dia.
+- **Última janela do dia** nunca passa do máximo da faixa etária, mesmo que a mediana pessoal for maior
+  — evita uma "janela final" gigante por causa de sonecas curtas acumuladas.
+- **Controle manual**: sonecas fixas por dia e hora mínima de acordar em Configurações (janelas fixas
+  por posição existem no motor via `settings.fixedWindows`, mas ainda sem campo próprio na interface —
+  ver simplificações abaixo).
+- **Dias atípicos**: marcar um dia em Registros ("Marcar como atípico") tira ele do cálculo das janelas
+  pessoais, sem apagar os registros daquele dia.
+- **Sugestão de redução de sonecas**: aparece como aviso (não aplica nada sozinho) quando 3 dos últimos
+  5 dias mostram sinais de que a última soneca não está encaixando (recusada ou tarde demais).
+- **"Por que este horário?"**: link que revela a explicação em texto simples de onde veio o número
+  (mediana pessoal com quantos registros, ou referência da idade, e se foi encurtada e por quê).
+
+**Simplificações assumidas nesta fase** (a Fase 2 do plano original também pedia um "plano do dia"
+completo — várias sonecas encadeadas até a hora de dormir — e visualização em arcos tracejados no
+relógio; ficou para depois, documentado aqui):
+- Só a **próxima janela** é prevista e mostrada, não a cadeia completa do dia (relevante principalmente
+  a partir de ~8-12 semanas e calibrado — hoje o Joaquim está em modo recém-nascido, que já pede
+  explicitamente para mostrar só a próxima janela).
+- Sem visualização de plano em arcos tracejados no relógio nem a linha "Próximos: soneca ~X · dormir
+  ~Y" — isso depende do "plano do dia" acima existir primeiro.
+- "Orçamento de sono diário" (antecipar a hora de dormir se o total do dia estiver baixo) também
+  depende do plano do dia completo — não implementado ainda.
+- Sem campo na interface para janelas fixas por posição (`fixedWindows`) nem hora de dormir fixa — o
+  motor já aceita esses parâmetros, só falta a tela em Configurações.
+- A referência de janela de vigília por idade mudou de tabela (mais granular antes, agora a tabela nova
+  pedida pela Fase 2) — os números mostrados no Guia e nos avisos podem variar um pouco dos que
+  apareciam antes da Fase 2, principalmente entre 4 e 8 semanas.
+
+27 testes novos em `tests/schedule.test.js` (74 no total, somando as fases anteriores), cobrindo as
+funções puras isoladas e cenários completos do `computeSchedule`.
+
+## Checklist local (Fase 2, Chrome/`localhost`)
+
+1. Sem nenhum sono registrado, a tela Hoje deve mostrar "Registre alguns sonos para as previsões
+   aparecerem" em vez de um horário.
+2. Registrar um sono e conferir que aparece "Próxima janela provável" (idade < 8 semanas → modo
+   recém-nascido) com a mensagem explicando o modo recém-nascido.
+3. Tocar em "Por que este horário?" → expande o texto explicando a origem do número; tocar de novo →
+   esconde.
+4. Marcar um dia em Registros como "atípico" → registrar vários sonos nesse dia não deveria mudar a
+   previsão (ela ignora esse dia no cálculo).
+5. Em Configurações, definir "Sonecas fixas por dia" e "Hora mínima de acordar" → salvar → registrar um
+   sono noturno terminando antes da hora mínima configurada → a próxima janela prevista deve encurtar
+   (~15 min a menos que o normal).
+6. Rodar `npm test` — os 27 testes de `schedule.test.js` cobrem esses cenários de forma determinística
+   (sem depender do relógio real), vale olhar se quiser entender o motor em detalhe.
+
+## Roteiro de testes manuais (Fase 2, no iPhone real)
+
+1. Ao longo de alguns dias de uso real, conferir se "Calibrando: faltam N dia(s)" desaparece depois de
+   3 dias completos de registros e vira uma previsão baseada no padrão real do Joaquim.
+2. Testar uma soneca claramente curta (<45 min) e conferir que a previsão da próxima janela fica menor
+   que o normal logo em seguida.
+3. Se/quando o Joaquim passar das 8 semanas: conferir que o modo muda de "recém-nascido" para o modo
+   com janelas normais (a mensagem de modo recém-nascido deve sumir).

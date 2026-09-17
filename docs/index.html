@@ -145,6 +145,16 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 </style>
 </head>
 <body>
+<section class="wrap login" id="setup" hidden>
+  <h1>Configuração inicial</h1>
+  <p>Cole os dados do projeto Supabase (Project Settings → API). Fica salvo só neste aparelho, ninguém mais precisa disso.</p>
+  <form id="formSetup">
+    <label for="setupUrl">Project URL</label><input type="url" id="setupUrl" placeholder="https://xxxxxxxx.supabase.co" required>
+    <label for="setupKey">Anon public key</label><input id="setupKey" required>
+    <button type="submit" class="btn primary">Salvar e continuar</button>
+    <p class="error" id="setupError" role="alert"></p>
+  </form>
+</section>
 <section class="wrap login" id="login" hidden>
   <h1>Sono do bebê</h1>
   <p>Entre com o e-mail cadastrado para você. Vamos enviar um link de acesso.</p>
@@ -154,6 +164,7 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
     <p class="error" id="loginError" role="alert"></p>
   </form>
   <p class="sent" id="loginSent" hidden>Link enviado. Abra seu e-mail neste aparelho para entrar.</p>
+  <button type="button" class="adjust" id="btnEditSetup">Trocar configuração do Supabase</button>
 </section>
 <div class="wrap" id="app">
   <header class="top">
@@ -218,9 +229,9 @@ const MIN = 60000, HOUR = 60*MIN, DAY = 24*HOUR, HISTORY_DAYS = 60;
 const KIND = {"peito-e":"Peito esquerdo","peito-d":"Peito direito","mamadeira":"Mamadeira","solido":"Comida"};
 
 /* ---------- Supabase ---------- */
-const SUPABASE_URL = "https://lozveygdolwouekvxwkz.supabase.co";
-const SUPABASE_ANON_KEY = "COLE_A_ANON_KEY_AQUI";
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const SB_CONFIG_KEY = "sono-sb-config";
+const loadSbConfig = () => { try { return JSON.parse(localStorage.getItem(SB_CONFIG_KEY)); } catch { return null; } };
+let sb = null;
 
 const S = { config:{name:"Joaquim",birth:""}, live:{}, ev:{}, users:{}, since:0, uid:null, tab:"hoje", online:true };
 let editing = null, adjusting = null;
@@ -319,7 +330,7 @@ async function flush(){
   } finally { flushing = false; updateBanner(); }
 }
 async function sync(){
-  if (!S.uid) return;
+  if (!sb || !S.uid) return;
   await flush();
   if (queue.length) return;
   try {
@@ -378,10 +389,29 @@ function updateBanner(){
   else b.hidden = true;
 }
 
+/* ---------- setup (Supabase URL/key, fica só neste aparelho) ---------- */
+function showSetup(){ $("#setup").hidden = false; $("#login").hidden = true; $("#app").hidden = true; $("#tabs").hidden = true; }
+$("#formSetup").addEventListener("submit", ev => {
+  ev.preventDefault(); $("#setupError").textContent = "";
+  const url = $("#setupUrl").value.trim().replace(/\/+$/, "");
+  const anonKey = $("#setupKey").value.trim();
+  if (!/^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(url) || anonKey.length < 20) {
+    $("#setupError").textContent = "Confira a URL e a chave coladas.";
+    return;
+  }
+  saveJSON(SB_CONFIG_KEY, {url, anonKey});
+  boot();
+});
+$("#btnEditSetup").addEventListener("click", () => {
+  const cfg = loadSbConfig();
+  if (cfg) { $("#setupUrl").value = cfg.url; $("#setupKey").value = cfg.anonKey; }
+  showSetup();
+});
+
 /* ---------- login ---------- */
-function showLogin(){ $("#login").hidden = false; $("#app").hidden = true; $("#tabs").hidden = true;
+function showLogin(){ $("#login").hidden = false; $("#setup").hidden = true; $("#app").hidden = true; $("#tabs").hidden = true;
   $("#formLogin").hidden = false; $("#loginSent").hidden = true; $("#loginEmail").value = ""; }
-function hideLogin(){ $("#login").hidden = true; $("#app").hidden = false; $("#tabs").hidden = false; }
+function hideLogin(){ $("#login").hidden = true; $("#setup").hidden = true; $("#app").hidden = false; $("#tabs").hidden = false; }
 $("#formLogin").addEventListener("submit", async ev => {
   ev.preventDefault(); $("#loginError").textContent = "";
   const email = $("#loginEmail").value.trim();
@@ -769,19 +799,25 @@ function subscribeRealtime(){
 }
 
 /* ---------- init ---------- */
+function boot(){
+  const cfg = loadSbConfig();
+  if (!cfg) { showSetup(); return; }
+  sb = window.supabase.createClient(cfg.url, cfg.anonKey);
+  sb.auth.onAuthStateChange((_event, session) => {
+    if (session) { S.uid = session.user.id; hideLogin(); sync(); }
+    else { S.uid = null; showLogin(); }
+  });
+  subscribeRealtime();
+}
 function init(){
   const c = loadJSON(CACHE_KEY, null);
   if (c) { S.ev = c.ev || {}; S.users = c.users || {}; S.since = c.since || 0; S.live = c.live || {};
     S.config = {...S.config, ...(c.config || {})}; S.uid = c.uid; }
   render();
-  sb.auth.onAuthStateChange((_event, session) => {
-    if (session) { S.uid = session.user.id; hideLogin(); sync(); }
-    else { S.uid = null; showLogin(); }
-  });
-  setInterval(() => { if (!document.hidden) sync(); }, 30000);
-  window.addEventListener("online", sync);
+  boot();
+  setInterval(() => { if (!document.hidden && sb) sync(); }, 30000);
+  window.addEventListener("online", () => { if (sb) sync(); });
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
-  subscribeRealtime();
 }
 init();
 })();

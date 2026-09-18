@@ -17,7 +17,10 @@ docs/               app do celular — é o que o GitHub Pages publica
   js/                lógica: app.js (render + Supabase) e módulos puros/testáveis
                       (time.js, validation.js, outbox.js, conflict.js, undo.js, store.js,
                       timeinput.js, sleep.js, schedule.js — motor de previsão,
-                      notifications.js — decide o que avisar)
+                      notifications.js — decide o que avisar,
+                      trends.js — agregação de tendências e curva de crescimento OMS)
+  data/               dados estáticos locais (who-growth-lms.json — parâmetros LMS da OMS)
+  vendor/             bibliotecas de terceiros copiadas localmente (jsPDF, SheetJS/xlsx) — sem CDN
   sw.js               service worker (cache do app shell + aviso de nova versão + push)
 supabase/
   schema.sql          foto atual completa do schema (tabelas + RLS + índices)
@@ -29,7 +32,7 @@ supabase/
 tests/               testes automatizados (Node, node:test) dos módulos puros de docs/js/
 ```
 
-## Status atual (atualizado em 2026-09-17)
+## Status atual (atualizado em 2026-09-18)
 
 Feito:
 - Schema aplicado no Supabase, RLS ativo, Realtime habilitado em `events`/`live_state`.
@@ -69,13 +72,19 @@ Feito:
 - **Atalho "Sono status" confirmado num iPhone real**: pedir pra Siri ("Ei Siri, Sono status") chama o
   Atalho, que chama `sono-quick-action` com o token do aparelho e a Siri fala a resposta (ex.: "Acordado
   há 40 min") — testado de ponta a ponta com sucesso.
+- **Fase 4 (tendências e relatórios)** implementada — ver
+  [Fase 4 — tendências e relatórios](#fase-4--tendências-e-relatórios) abaixo. Sem migração nova (usa
+  as colunas que a Fase 1 já criou, incluindo `sono_growth`).
 
 Pendente:
 - Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo
   definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
 - Ativar notificações de verdade num iPhone (só dá pra testar com o app instalado, iOS 16.4+).
-- Fases 4–6 (tendências, sons, agenda/conteúdo) — ainda não iniciadas.
+- Validar a Fase 4 num iPhone real (gráficos, relatório em PDF e exportação XLSX/CSV pela folha de
+  compartilhamento do iOS) — só testei em Node (lógica pura) e sintaticamente; não há como abrir o
+  Safari real neste ambiente.
+- Fases 5–6 (sons para dormir, agenda/conteúdo/aba "Vocês") — ainda não iniciadas.
 
 **Detalhe importante para quem for mexer no banco:** o projeto Supabase usado
 (`lozveygdolwouekvxwkz`, região sa-east-1) é **compartilhado** com outro app do dono do repositório
@@ -471,3 +480,80 @@ testar a assinatura e as preferências, mas não o recebimento real da notifica�
    ("Ei Siri, [nome do atalho]") → ela deve falar a resposta.
 6. Testar um atalho de escrita (ex. `diaper`) → o registro deve aparecer no app, sincronizado com
    `device_name` do token usado.
+
+## Fase 4 — tendências e relatórios
+
+A antiga aba "Semana" virou **"Tendências"** (mesmo lugar na barra inferior) — a visão de 7 dias antiga
+continua lá ("Visão geral", no topo), e por baixo dela entraram os gráficos novos pedidos na Fase 4,
+todos em SVG próprio (sem biblioteca de gráficos), com seletor de período **7/14/30 dias**.
+
+**O que entrou, na ordem da tela:**
+- **Sono: dia × noite** — barras empilhadas (soneca clara + noite escura) por dia, com linhas
+  tracejadas marcando a referência de sono total para a idade (mesma referência da tela Hoje).
+- **Sonecas** — duração total de soneca por dia, com a quantidade de sonecas escrita acima da barra.
+- **Maior trecho noturno e despertares** — barra do maior sono contínuo à noite, com o número de
+  despertares (pausas registradas durante o sono) acima.
+- **Horários de dormir e acordar** — dois gráficos de pontos, um por dia, ligando os horários entre si.
+- **Mamadas** — barras por dia, separadas por peito esquerdo/direito/mamadeira-outros, com a média de
+  ml/dia nos dias com mamadeira registrada.
+- **Fraldas por dia** — barras empilhadas por tipo (xixi/cocô/ambos).
+- **Mapa de calor 24h × dias** — intensidade da cor = fração daquela hora dormindo, uma linha por dia.
+- **Crescimento** — peso comparado à curva da OMS (0–24 meses; linhas de referência P3/P15/P50/P85/P97),
+  mais a lista completa de medidas (toque para editar) e um botão para adicionar uma nova. Pede o sexo
+  do bebê (Configurações → "Sexo") para poder comparar com a tabela certa — sem isso, mostra só a lista.
+  **Fonte dos dados da curva:** WHO Child Growth Standards (0–24 meses), parâmetros L/M/S baixados da
+  publicação oficial do CDC/NCHS (`docs/data/who-growth-lms.json`, ~4 KB, citada também na tela).
+- **Resumo** — de 3 a 5 frases simples (`docs/js/trends.js`, `computeInsights`), sem alarmismo: médias
+  do período, nunca "abaixo do recomendado" ou parecido. Se tiver menos de 3 dias com sono registrado,
+  só avisa que ainda faltam dias.
+- **Relatório PDF / Exportar XLSX / Exportar CSV** — botões no fim da tela. O PDF é um resumo de uma
+  página (`docs/js/app.js`, `exportPdfReport`, biblioteca `jsPDF`) com os mesmos números do Resumo, a
+  última medida de crescimento e um aviso de que é um diário, não um documento médico. XLSX/CSV exportam
+  os registros do período selecionado (uma planilha "Registros" + "Crescimento" no XLSX). Os três usam a
+  folha de compartilhamento do iOS (`navigator.share({files})`) quando disponível, com download comum
+  como alternativa.
+
+**Sem CDN em runtime:** `jsPDF` (`docs/vendor/jspdf.umd.min.js`) e `SheetJS`/`xlsx`
+(`docs/vendor/xlsx.full.min.js`) foram baixados uma vez e ficam versionados no repositório, cacheados
+pelo service worker (`sono-shell-v10`) para funcionar offline. Só são carregados (`<script>` injetado)
+na primeira vez que o relatório ou a exportação é usada, para não pesar a abertura normal do app.
+
+**Simplificações assumidas:**
+- "Semana" virou "Tendências" no mesmo lugar da barra, em vez de uma quinta aba nova — pareceu melhor
+  manter a navegação em uma mão com 4 abas do que duplicar conteúdo (a antiga Semana era um subconjunto
+  do que a Tendências mostra agora).
+- Sono é agrupado pelo dia em que **começa** (mesmo critério já usado em Registros e no motor de
+  previsão), não pelo relógio — um sono das 23h às 6h conta inteiro na noite que começou, não se divide
+  entre os dois dias no gráfico de barras (só o mapa de calor, que é por hora, mostra a divisão real).
+- Curva de crescimento só tem peso por enquanto (altura e perímetro cefálico já ficam salvos e aparecem
+  na lista, mas o gráfico comparado à OMS ficou só para peso — dá pra estender do mesmo jeito depois).
+- Os despertares noturnos do gráfico de tendência vêm das pausas registradas durante o sono (mesmo dado
+  da Fase 1); se o sono foi registrado retroativamente sem marcar pausas, aparece como 0 despertares.
+- Não consigo testar os gráficos, o PDF nem a exportação num navegador de verdade neste ambiente — só
+  `npm test` (lógica pura de `docs/js/trends.js`, 14 testes novos) e checagem de sintaxe
+  (`node --check`) em `docs/js/app.js`. Preciso da sua validação visual no iPhone (roteiro abaixo).
+
+## Checklist local (Fase 4, Chrome/`localhost`)
+
+1. Ir em Configurações, definir data de nascimento e sexo do bebê, salvar.
+2. Adicionar algumas medidas de crescimento (peso pelo menos) em datas diferentes.
+3. Abrir a aba "Tendências" → devem aparecer os gráficos com dados dos últimos 7 dias.
+4. Trocar para "14 dias" e "30 dias" nos chips do topo → os gráficos devem recarregar com mais dias.
+5. Conferir o gráfico de Crescimento → deve mostrar as linhas de referência da OMS e os pontos do bebê;
+   a lista abaixo deve mostrar o percentil aproximado de cada pesagem.
+6. Tocar num item da lista de crescimento → deve abrir para editar; "Adicionar medida" deve abrir em
+   branco (não deve sobrescrever a última medida).
+7. Tocar em "Relatório PDF" → deve baixar/abrir um PDF de uma página com o resumo.
+8. Tocar em "Exportar XLSX" e "Exportar CSV" → devem baixar os arquivos correspondentes.
+
+## Roteiro de testes manuais (Fase 4, no iPhone real)
+
+1. Abrir "Tendências" com o app instalado → os gráficos devem renderizar sem quebrar o layout (rolar a
+   tela inteira, nenhum gráfico deve estourar a largura da tela).
+2. Trocar o período (7/14/30 dias) → deve recarregar rápido, sem travar.
+3. Tocar em "Relatório PDF" → deve abrir a folha de compartilhamento do iOS com um PDF anexado (testar
+   salvar em Arquivos e enviar por mensagem).
+4. Tocar em "Exportar XLSX" → mesma folha de compartilhamento, com um `.xlsx` que abre no Numbers/Excel.
+5. Tocar em "Exportar CSV" → mesma folha, com um `.csv` legível (acentos corretos) no Numbers/Excel.
+6. Testar offline (modo avião, app já aberto uma vez para cachear): abrir Tendências, tocar nos três
+   botões de exportação → devem continuar funcionando (bibliotecas já estão no cache do service worker).

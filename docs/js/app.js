@@ -5,9 +5,12 @@ import { scheduleDelete, cancelDelete, isPending, isExpired, UNDO_WINDOW_MS } fr
 import { parseDigitsToTime, offsetFromNow } from "./timeinput.js";
 import { netSleepDuration, classifySleep, findSleepOverlap } from "./sleep.js";
 import { ageWakeWindowRef, dailySleepRefHours, computeSchedule } from "./schedule.js";
+import {
+  buildTrend, computeInsights, ageMonthsExact, growthPoint, percentileCurve, WHO_PERCENTILE_LINES,
+} from "./trends.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.17-fase3";
+const APP_VERSION = "2026.09.18-fase4";
 // Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
 // a privada fica só nos secrets da Edge Function, nunca aqui).
 const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";
@@ -16,6 +19,8 @@ const DIAPER_LABEL = { "xixi": "Xixi", "coco": "Cocô", "ambos": "Xixi e cocô" 
 const PLACE_LABEL = { berco: "berço", colo: "colo", carrinho: "carrinho", carro: "carro", sling: "sling" };
 const MILK_LABEL = { formula: "fórmula", materno: "materno ordenhado", misto: "misto" };
 const AGENDA_KIND_LABEL = { consulta: "Consulta", vacina: "Vacina", banho: "Banho", passeio: "Passeio", outro: "Compromisso" };
+const SEX_LABEL = { boy: "Menino", girl: "Menina" };
+const TREND_PERIODS = [7, 14, 30];
 const HISTORY_DAYS = 60;
 
 // Catálogo dos atalhos configuráveis da tela Hoje (além de Peito E/D/Mamadeira, que ficam
@@ -40,7 +45,7 @@ const saveSbConfig = v => { try { localStorage.setItem(SB_CONFIG_KEY, JSON.strin
 let sb = null;
 
 const S = { config: { name: "Joaquim", birth: "", settings: {} }, live: { version: 1, pauses: [] }, ev: {}, growth: {}, agenda: {},
-  users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "", onboardingDone: false };
+  users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "", onboardingDone: false, trendsDays: 7 };
 let editing = null, adjusting = null, editingGrowth = null, editingAgenda = null;
 let pendingSave = null, pendingOverlapId = null, pendingOverlapVersion = 1;
 let obStep = 0;
@@ -61,6 +66,30 @@ const dayLabel = ms => { const t = midnight(Date.now()); const d = midnight(ms);
   if (d === t) return "Hoje"; if (d === t - DAY) return "Ontem";
   return new Date(ms).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric", month: "short" }); };
 function nightWindow() { const s = S.config.settings || {}; return [Number.isFinite(s.nightStart) ? s.nightStart : 19, Number.isFinite(s.nightEnd) ? s.nightEnd : 7]; }
+
+/* ---------- bibliotecas locais (Fase 4: PDF/XLSX), sem CDN em runtime ----------
+   Ficam em docs/vendor/ (cacheadas pelo service worker) e só são carregadas quando o
+   relatório/exportação é realmente usado — evita gastar tempo de boot com libs pesadas. */
+const loadedScripts = {};
+function loadScriptOnce(src, alreadyLoaded) {
+  if (alreadyLoaded()) return Promise.resolve();
+  if (!loadedScripts[src]) {
+    loadedScripts[src] = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src; s.onload = () => resolve(); s.onerror = () => reject(new Error("Falha ao carregar " + src));
+      document.head.appendChild(s);
+    });
+  }
+  return loadedScripts[src];
+}
+
+/* ---------- curva de crescimento OMS: dados LMS locais (Fase 4) ---------- */
+let whoGrowthData = null, whoGrowthPromise = null;
+function loadWhoGrowthData() {
+  if (whoGrowthData) return Promise.resolve(whoGrowthData);
+  if (!whoGrowthPromise) whoGrowthPromise = fetch("./data/who-growth-lms.json").then(r => r.json()).then(d => { whoGrowthData = d; return d; });
+  return whoGrowthPromise;
+}
 
 function toast(msg) {
   const t = $("#toast");
@@ -586,6 +615,7 @@ function lastGrowth() {
   const list = Object.values(S.growth).filter(g => g && !g.deleted).sort((a, b) => b.measuredAt - a.measuredAt);
   return list[0] || null;
 }
+const growthAsc = () => Object.values(S.growth).filter(g => g && !g.deleted).sort((a, b) => a.measuredAt - b.measuredAt);
 function upcomingAgenda() {
   const now = Date.now() - HOUR;
   return Object.values(S.agenda).filter(a => a && !a.deleted && !a.completed && a.scheduledAt >= now)
@@ -727,39 +757,243 @@ function renderToday() {
     <div class="actions"><button class="btn ghost" data-new>Adicionar registro passado</button></div>`;
 }
 
-/* ---------- render: week ---------- */
-function renderWeek() {
+/* ---------- render: week timeline (visão geral, dentro de Tendências) ---------- */
+function renderWeekTimeline(days) {
   const now = Date.now(), t0 = midnight(now);
   const sl = sleeps(); if (S.live.sleepStart) sl.push({ start: S.live.sleepStart, end: now });
   const fd = feeds();
-  let rows = "", totals = [], longest = [];
-  for (let i = 0; i < 7; i++) {
+  let rows = "";
+  for (let i = 0; i < days; i++) {
     const d0 = t0 - i * DAY, d1 = d0 + DAY;
-    let segs = `<div class="n" style="left:0;width:${7 / 24 * 100}%"></div><div class="n" style="left:${19 / 24 * 100}%;width:${5 / 24 * 100}%"></div>`, tot = 0, lg = 0;
+    let segs = `<div class="n" style="left:0;width:${7 / 24 * 100}%"></div><div class="n" style="left:${19 / 24 * 100}%;width:${5 / 24 * 100}%"></div>`, tot = 0;
     for (const s of sl) { const a = Math.max(s.start, d0), b = Math.min(s.end, d1); if (b <= a) continue;
-      tot += b - a; lg = Math.max(lg, s.end - s.start);
+      tot += b - a;
       segs += `<div class="s" style="left:${(a - d0) / DAY * 100}%;width:${(b - a) / DAY * 100}%"></div>`; }
     for (const f of fd) if (f.start >= d0 && f.start < d1) segs += `<div class="f" style="left:${(f.start - d0) / DAY * 100}%"></div>`;
     const lbl = new Date(d0).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric" });
     rows += `<div class="week-row"><span class="lbl">${i === 0 ? "Hoje" : esc(lbl)}</span><div class="bar">${segs}</div><span class="tot">${tot ? fmtDur(tot / MIN) : "—"}</span></div>`;
-    if (i > 0 && tot) { totals.push(tot / MIN); longest.push(lg / MIN); }
   }
-  const avg = totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : null;
-  const ref = sleepRef(ageWeeks());
-  const feedsPerDay = (() => { const c = fd.filter(f => f.start >= t0 - 7 * DAY && f.start < t0).length; return c ? (c / Math.max(1, totals.length || 7)).toFixed(1) : null; })();
-  $("#view-semana").innerHTML = `
-    <h2>Últimos 7 dias</h2>
-    <div class="legend"><span><i style="background:var(--sleep)"></i>sono</span><span><i style="background:var(--feed)"></i>mamada</span><span><i style="background:var(--night)"></i>noite (19h–7h)</span></div>
+  return `<div class="legend"><span><i style="background:var(--sleep)"></i>sono</span><span><i style="background:var(--feed)"></i>mamada</span><span><i style="background:var(--night)"></i>noite (19h–7h)</span></div>
     <div class="scroll">
       <div class="axis"><span></span><div><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>24h</span></div><span></span></div>
       ${rows}
-    </div>
-    <div class="summary">
-      <h2>Resumo dos dias completos</h2>
-      ${avg == null ? `<p class="empty">Os resumos aparecem depois do primeiro dia completo com registros.</p>` : `
-      <p>Média de sono: <strong>${fmtDur(avg)}</strong> por dia (referência ${ref.min}–${ref.max} h). Dias com registro incompleto puxam a média para baixo.</p>
-      <p>Maior sono contínuo, em média: <strong>${fmtDur(longest.reduce((a, b) => a + b, 0) / longest.length)}</strong>. Nas primeiras semanas é normal ficar entre 2 e 4 h; o trecho longo tende a crescer e a se deslocar para a noite a partir de 2–3 meses.</p>
-      ${feedsPerDay ? `<p>Mamadas registradas: <strong>${feedsPerDay}</strong> por dia em média.</p>` : ""}`}
+    </div>`;
+}
+
+/* ---------- gráficos SVG genéricos (Fase 4) ---------- */
+const CHART_W = 320, CHART_H = 110;
+function dayLabelShort(ms) { return new Date(ms).toLocaleDateString("pt-BR", { day: "numeric", month: "numeric" }); }
+// Barras empilhadas por dia. `getSegments(day)` devolve [{value,color}]; `topLabel(day)` texto opcional acima da barra.
+function trendBarsSVG(trend, { getSegments, topLabel, maxValue, refLines, ariaLabel }) {
+  const padL = 4, padR = 4, padT = 14, padB = 16;
+  const innerW = CHART_W - padL - padR, innerH = CHART_H - padT - padB;
+  const n = Math.max(1, trend.length), gap = n > 12 ? 2 : 4;
+  const bw = Math.max(2, (innerW - gap * (n - 1)) / n);
+  const sums = trend.map(d => getSegments(d).reduce((s, seg) => s + seg.value, 0));
+  const max = maxValue || Math.max(1, ...sums);
+  let bars = "";
+  trend.forEach((d, i) => {
+    const x = padL + i * (bw + gap);
+    let yCursor = padT + innerH;
+    for (const seg of getSegments(d)) {
+      if (seg.value <= 0) continue;
+      const segH = (seg.value / max) * innerH;
+      yCursor -= segH;
+      bars += `<rect x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(0, segH).toFixed(1)}" fill="${seg.color}" rx="1"/>`;
+    }
+    if (topLabel) {
+      const lbl = topLabel(d);
+      if (lbl) bars += `<text x="${(x + bw / 2).toFixed(1)}" y="${(yCursor - 3).toFixed(1)}" text-anchor="middle" font-size="7.5" fill="var(--muted)">${esc(lbl)}</text>`;
+    }
+  });
+  let refs = "";
+  for (const r of (refLines || [])) {
+    const yy = padT + innerH - (r.value / max) * innerH;
+    refs += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${(CHART_W - padR).toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${r.color}" stroke-width="1" stroke-dasharray="3,3"/>`;
+  }
+  const firstLbl = trend[0] ? dayLabelShort(trend[0].start) : "", lastLbl = trend[n - 1] ? dayLabelShort(trend[n - 1].start) : "";
+  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="chart" role="img" aria-label="${esc(ariaLabel || "")}">
+    ${refs}${bars}
+    <text x="${padL}" y="${CHART_H - 3}" font-size="8" fill="var(--muted)">${esc(firstLbl)}</text>
+    <text x="${CHART_W - padR}" y="${CHART_H - 3}" font-size="8" fill="var(--muted)" text-anchor="end">${esc(lastLbl)}</text>
+  </svg>`;
+}
+// Pontos por dia (ex.: horário de dormir/acordar). `getValue(day)` devolve hora decimal ou null.
+function trendDotsSVG(trend, { getValue, min, max, wrapBelow, color, ariaLabel }) {
+  const padL = 4, padR = 4, padT = 8, padB = 16;
+  const innerW = CHART_W - padL - padR, innerH = 56 - padT - padB, H = 56;
+  const n = Math.max(1, trend.length), stepX = n > 1 ? innerW / (n - 1) : 0;
+  const y = v => padT + innerH - ((v - min) / (max - min)) * innerH;
+  const coords = trend.map((d, i) => {
+    let v = getValue(d);
+    if (v == null) return null;
+    if (wrapBelow != null && v < wrapBelow) v += 24;
+    v = Math.min(max, Math.max(min, v));
+    return [padL + i * stepX, y(v)];
+  });
+  let line = "";
+  for (let i = 1; i < coords.length; i++) if (coords[i] && coords[i - 1]) line += `M${coords[i - 1][0].toFixed(1)},${coords[i - 1][1].toFixed(1)} L${coords[i][0].toFixed(1)},${coords[i][1].toFixed(1)} `;
+  const pts = coords.filter(Boolean).map(c => `<circle cx="${c[0].toFixed(1)}" cy="${c[1].toFixed(1)}" r="2.4" fill="${color}"/>`).join("");
+  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart" role="img" aria-label="${esc(ariaLabel || "")}"><path d="${line}" stroke="${color}" stroke-width="1.2" fill="none" opacity=".5"/>${pts}</svg>`;
+}
+function trendHeatmapSVG(trend) {
+  const padL = 22, padT = 2, padB = 12;
+  const cell = (CHART_W - padL) / 24;
+  const H = padT + trend.length * cell + padB;
+  let cells = "", labels = "";
+  trend.forEach((d, r) => {
+    for (let h = 0; h < 24; h++) {
+      const v = Math.min(1, d.hours[h] || 0);
+      cells += `<rect x="${(padL + h * cell).toFixed(1)}" y="${(padT + r * cell).toFixed(1)}" width="${(cell - 0.6).toFixed(1)}" height="${(cell - 0.6).toFixed(1)}" fill="var(--sleep)" opacity="${v.toFixed(2)}"/>`;
+    }
+    if (r === 0 || r === trend.length - 1 || trend.length <= 10) labels += `<text x="0" y="${(padT + r * cell + cell * 0.72).toFixed(1)}" font-size="7" fill="var(--muted)">${esc(dayLabelShort(d.start))}</text>`;
+  });
+  const hourTicks = [0, 6, 12, 18].map(h => `<text x="${(padL + h * cell).toFixed(1)}" y="${(padT + trend.length * cell + 9).toFixed(1)}" font-size="7" fill="var(--muted)">${h}h</text>`).join("");
+  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart" role="img" aria-label="Mapa de calor de sono por hora do dia">${cells}${labels}${hourTicks}</svg>`;
+}
+function growthChartSVG(table, measurements, birthMs) {
+  const padL = 26, padR = 6, padT = 8, padB = 16, H = 150;
+  const innerW = CHART_W - padL - padR, innerH = H - padT - padB;
+  const curves = WHO_PERCENTILE_LINES.map(l => ({ ...l, pts: percentileCurve(table, l.z, 1) }));
+  const values = curves.flatMap(c => c.pts.map(p => p.value)).concat(measurements.map(m => m.value));
+  const vMin = Math.min(...values) * 0.95, vMax = Math.max(...values) * 1.05;
+  const x = m => padL + (m / 24) * innerW;
+  const y = v => padT + innerH - ((v - vMin) / (vMax - vMin)) * innerH;
+  const paths = curves.map(c => {
+    const d = c.pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.ageMonths).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
+    const median = c.p === 50;
+    return `<path d="${d}" fill="none" stroke="var(--muted)" stroke-width="${median ? 1.4 : 0.8}" opacity="${median ? .85 : .4}"/>`;
+  }).join("");
+  const dots = measurements.map(m => {
+    const ageM = ageMonthsExact(birthMs, m.measuredAt);
+    if (ageM > 24) return "";
+    return `<circle cx="${x(ageM).toFixed(1)}" cy="${y(m.value).toFixed(1)}" r="3" fill="var(--sleep)"/>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart" role="img" aria-label="Curva de crescimento comparada às referências da OMS">
+    <text x="${padL}" y="${H - 3}" font-size="8" fill="var(--muted)">0 m</text>
+    <text x="${CHART_W - padR}" y="${H - 3}" font-size="8" fill="var(--muted)" text-anchor="end">24 m</text>
+    <text x="${padL}" y="${(padT + 8).toFixed(1)}" font-size="7" fill="var(--muted)">${vMax.toFixed(1)}</text>
+    <text x="${padL}" y="${(padT + innerH).toFixed(1)}" font-size="7" fill="var(--muted)">${vMin.toFixed(1)}</text>
+    ${paths}${dots}
+  </svg>`;
+}
+
+/* ---------- render: Tendências (Fase 4) ---------- */
+function periodStart(days) { return midnight(Date.now()) - (days - 1) * DAY; }
+function periodEvents() { const c = periodStart(S.trendsDays); return events().filter(e => e.start >= c); }
+function currentTrend() {
+  const sl = sleeps(); if (S.live.sleepStart) sl.push({ start: S.live.sleepStart, end: Date.now(), data: {} });
+  const fd = feeds(), dp = events().filter(e => e.type === "diaper");
+  return buildTrend({ sleepEvents: sl, feedEvents: fd, diaperEvents: dp, now: Date.now(), days: S.trendsDays, nightWindow: nightWindow() });
+}
+function growthSectionHTML() {
+  const sex = S.config.settings && S.config.settings.sex;
+  const list = growthAsc();
+  const rowsHTML = [...list].reverse().slice(0, 20).map(g => {
+    const pct = (sex && S.config.birth && whoGrowthData && g.weightG) ? growthPoint(whoGrowthData.weight[sex], ageMonthsExact(new Date(S.config.birth + "T12:00:00").getTime(), g.measuredAt), g.weightG / 1000) : null;
+    return `<button class="rec" data-growth-edit="${esc(g.id)}"><span class="dot" style="background:var(--sleep)"></span>
+      <span class="t">${esc(dayLabelShort(g.measuredAt))}</span>
+      <span class="x">${g.weightG ? `${(g.weightG / 1000).toFixed(2).replace(".", ",")} kg` : ""}${g.heightCm ? ` · ${g.heightCm} cm` : ""}${g.headCm ? ` · PC ${g.headCm} cm` : ""}
+      ${pct ? `<small>peso no percentil ~${Math.round(pct.percentile)}</small>` : ""}</span></button>`;
+  }).join("");
+  let chart = `<p class="empty">Adicione pelo menos um registro de peso para ver o gráfico.</p>`;
+  if (!S.config.birth) chart = `<p class="empty">Defina a data de nascimento em Configurações para ver a curva.</p>`;
+  else if (!sex) chart = `<p class="empty">Defina o sexo do bebê em Configurações para comparar com as referências da OMS.</p>`;
+  else if (!whoGrowthData) { chart = `<p class="empty">Carregando curva…</p>`; loadWhoGrowthData().then(() => { if (S.tab === "semana") render(); }); }
+  else {
+    const weighed = list.filter(g => g.weightG).map(g => ({ measuredAt: g.measuredAt, value: g.weightG / 1000 }));
+    if (weighed.length) {
+      const birthMs = new Date(S.config.birth + "T12:00:00").getTime();
+      chart = growthChartSVG(whoGrowthData.weight[sex], weighed, birthMs);
+    }
+  }
+  return `<h2>Crescimento</h2>
+    <p class="src">Peso × referência da OMS${sex ? ` (${SEX_LABEL[sex]})` : ""} (0–24 meses; linhas P3/P15/P50/P85/P97).
+    Fonte: WHO Child Growth Standards, parâmetros LMS republicados pelo CDC/NCHS.</p>
+    ${chart}
+    <div class="actions" style="margin-top:6px"><button type="button" class="btn ghost" data-growth-new>Adicionar medida</button></div>
+    ${rowsHTML || `<p class="empty">Nenhuma medida registrada ainda.</p>`}`;
+}
+function renderTrends() {
+  const trend = currentTrend();
+  const ref = sleepRef(ageWeeks());
+  const chips = TREND_PERIODS.map(d => `<button type="button" class="chip${S.trendsDays === d ? " on" : ""}" data-trend-period="${d}">${d} dias</button>`).join("");
+  const insights = computeInsights(trend);
+
+  const sleepChart = trendBarsSVG(trend, {
+    ariaLabel: "Sono por dia, noite e soneca, com faixa de referência para a idade",
+    getSegments: d => [{ value: d.sleepNightMin / 60, color: "var(--sleep)" }, { value: d.sleepDayMin / 60, color: "var(--sleep-soft)" }],
+    refLines: [{ value: ref.min, color: "var(--ok)" }, { value: ref.max, color: "var(--ok)" }],
+  });
+  const napsChart = trendBarsSVG(trend, {
+    ariaLabel: "Duração total de sonecas por dia, com a quantidade de sonecas",
+    getSegments: d => [{ value: d.sleepDayMin, color: "var(--sleep-soft)" }],
+    topLabel: d => d.napCount ? String(d.napCount) : "",
+  });
+  const nightChart = trendBarsSVG(trend, {
+    ariaLabel: "Maior trecho contínuo de sono à noite por dia, com o número de despertares",
+    getSegments: d => [{ value: d.longestNightMin / 60, color: "var(--sleep)" }],
+    topLabel: d => d.wakenings ? `${d.wakenings}⤫` : "",
+  });
+  const bedWakeChart = `<div class="legend"><span><i style="background:var(--sleep)"></i>dormiu</span><span><i style="background:var(--ok)"></i>acordou</span></div>
+    ${trendDotsSVG(trend, { ariaLabel: "Horário de dormir por dia", getValue: d => d.bedtime != null ? new Date(d.bedtime).getHours() + new Date(d.bedtime).getMinutes() / 60 : null, min: 15, max: 27, wrapBelow: 12, color: "var(--sleep)" })}
+    ${trendDotsSVG(trend, { ariaLabel: "Horário de acordar por dia", getValue: d => d.wake != null ? new Date(d.wake).getHours() + new Date(d.wake).getMinutes() / 60 : null, min: 3, max: 11, color: "var(--ok)" })}`;
+  const feedChart = trendBarsSVG(trend, {
+    ariaLabel: "Mamadas por dia, por lado e tipo",
+    getSegments: d => [
+      { value: d.feedBySide["peito-e"] || 0, color: "var(--sleep)" }, { value: d.feedBySide["peito-d"] || 0, color: "var(--ok)" },
+      { value: Math.max(0, d.feedCount - (d.feedBySide["peito-e"] || 0) - (d.feedBySide["peito-d"] || 0)), color: "var(--feed)" },
+    ],
+  });
+  const avgMl = (() => { const days = trend.filter(d => d.feedMl > 0); return days.length ? Math.round(days.reduce((s, d) => s + d.feedMl, 0) / days.length) : null; })();
+  const diaperChart = trendBarsSVG(trend, {
+    ariaLabel: "Fraldas por dia, por tipo",
+    getSegments: d => [{ value: d.diaper.xixi, color: "var(--sleep)" }, { value: d.diaper.coco, color: "var(--feed)" }, { value: d.diaper.ambos, color: "var(--ok)" }],
+  });
+
+  $("#view-semana").innerHTML = `
+    <h2>Tendências</h2>
+    <div class="chips">${chips}</div>
+    <h2>Visão geral</h2>
+    ${renderWeekTimeline(Math.min(S.trendsDays, 30))}
+
+    <h2>Sono: dia × noite</h2>
+    <p class="src">Faixa clara = sonecas, escura = noite. Linhas tracejadas: referência de sono total para a idade (${ref.min}–${ref.max} h, ${esc(ref.src)}).</p>
+    ${sleepChart}
+
+    <h2>Sonecas</h2>
+    <p class="src">Duração total de sonecas por dia; número acima da barra é a quantidade de sonecas.</p>
+    ${napsChart}
+
+    <h2>Maior trecho noturno e despertares</h2>
+    <p class="src">Barra: maior sono contínuo à noite. "N⤫" acima: despertares (pausas) naquela noite.</p>
+    ${nightChart}
+
+    <h2>Horários de dormir e acordar</h2>
+    ${bedWakeChart}
+
+    <h2>Mamadas</h2>
+    <p class="src">Peito esquerdo, direito e mamadeira/outros por dia.${avgMl ? ` Média de ${avgMl} ml/dia nos dias com mamadeira registrada.` : ""}</p>
+    ${feedChart}
+
+    <h2>Fraldas por dia</h2>
+    <div class="legend"><span><i style="background:var(--sleep)"></i>xixi</span><span><i style="background:var(--feed)"></i>cocô</span><span><i style="background:var(--ok)"></i>ambos</span></div>
+    ${diaperChart}
+
+    <h2>Mapa de calor (sono por hora)</h2>
+    ${trendHeatmapSVG(trend)}
+
+    ${growthSectionHTML()}
+
+    <h2>Resumo</h2>
+    <ul>${insights.map(i => `<li>${esc(i)}</li>`).join("")}</ul>
+    <p class="src">Isto é um diário, não um dispositivo médico. Janelas de sono e curvas de crescimento são
+    referências de prática clínica (AAP/AASM/NSF/OMS), não um diagnóstico.</p>
+
+    <div class="actions">
+      <button type="button" class="btn ghost" data-export="pdf">Relatório PDF</button>
+      <button type="button" class="btn ghost" data-export="xlsx">Exportar XLSX</button>
+      <button type="button" class="btn ghost" data-export="csv">Exportar CSV</button>
     </div>`;
 }
 
@@ -865,6 +1099,91 @@ async function exportBackup() {
     URL.revokeObjectURL(a.href);
     toast("Backup baixado.");
   } catch (e) { if (e && e.name !== "AbortError") toast("Não foi possível gerar o backup agora (sem conexão?)."); }
+}
+
+/* ---------- Fase 4: relatório e exportação ---------- */
+// Compartilha um arquivo pela folha do iOS quando possível; senão baixa (<a download>) como alternativa.
+async function shareOrDownloadBlob(blob, filename, shareTitle) {
+  if (navigator.canShare && window.File) {
+    const file = new File([blob], filename, { type: blob.type });
+    if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: shareTitle }); return; }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+function eventRows(evList) {
+  return evList.map(e => ({
+    data: dayKey(e.start), hora_inicio: fmtTime(e.start), hora_fim: e.end ? fmtTime(e.end) : "",
+    tipo: e.type, detalhe: eventTitle(e), duracao_min: e.end ? Math.round((e.end - e.start) / MIN) : "",
+    ml: e.ml != null ? e.ml : "", observacao: e.note || "", registrado_por: e.by ? nameFor(e) : "",
+  }));
+}
+function growthRows() {
+  return growthAsc().map(g => ({
+    data: dayKey(g.measuredAt), peso_g: g.weightG != null ? g.weightG : "", altura_cm: g.heightCm != null ? g.heightCm : "",
+    perimetro_cefalico_cm: g.headCm != null ? g.headCm : "", observacao: g.note || "",
+  }));
+}
+async function runExport(kind) {
+  try {
+    if (kind === "csv") return await exportCsv();
+    if (kind === "xlsx") return await exportXlsx();
+    if (kind === "pdf") return await exportPdfReport();
+  } catch (e) { if (e && e.name !== "AbortError") toast("Não foi possível gerar o arquivo agora."); }
+}
+async function exportCsv() {
+  const rows = eventRows(periodEvents());
+  const headers = ["data", "hora_inicio", "hora_fim", "tipo", "detalhe", "duracao_min", "ml", "observacao", "registrado_por"];
+  const escCsv = v => { const s = String(v ?? ""); return /[",;\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const csv = [headers.join(";"), ...rows.map(r => headers.map(h => escCsv(r[h])).join(";"))].join("\r\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  await shareOrDownloadBlob(blob, `sono-registros-${dayKey(Date.now())}.csv`, "Registros — Sono do Joaquim");
+}
+async function exportXlsx() {
+  await loadScriptOnce("./vendor/xlsx.full.min.js", () => !!window.XLSX);
+  const XLSX = window.XLSX;
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(eventRows(periodEvents())), "Registros");
+  const gRows = growthRows();
+  if (gRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(gRows), "Crescimento");
+  const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  const blob = new Blob([out], { type: "application/octet-stream" });
+  await shareOrDownloadBlob(blob, `sono-registros-${dayKey(Date.now())}.xlsx`, "Registros — Sono do Joaquim");
+}
+async function exportPdfReport() {
+  await loadScriptOnce("./vendor/jspdf.umd.min.js", () => !!(window.jspdf && window.jspdf.jsPDF));
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  const trend = currentTrend();
+  const insights = computeInsights(trend);
+  const ref = sleepRef(ageWeeks());
+  let y = 18;
+  const ensure = need => { if (y + need > 280) { doc.addPage(); y = 18; } };
+  doc.setFontSize(16); doc.text(`Relatório de sono — ${S.config.name || "Bebê"}`, 14, y); y += 8;
+  doc.setFontSize(10); doc.setTextColor(100);
+  doc.text(`Período: últimos ${S.trendsDays} dias · Idade: ${ageText(ageWeeks())} · Gerado em ${new Date().toLocaleString("pt-BR")}`, 14, y); y += 10;
+  doc.setTextColor(20);
+  doc.setFontSize(12); doc.text("Resumo", 14, y); y += 6;
+  doc.setFontSize(10);
+  for (const line of insights) { ensure(6); const wrapped = doc.splitTextToSize(`• ${line}`, 180); doc.text(wrapped, 14, y); y += 5 * wrapped.length; }
+  y += 4; ensure(6);
+  doc.setFontSize(12); doc.text("Sono nas últimas 24 h", 14, y); y += 6;
+  doc.setFontSize(10);
+  doc.text(`Referência para a idade (${ref.src}): ${ref.min}–${ref.max} h por dia.`, 14, y); y += 8;
+  const lg = lastGrowth();
+  if (lg) {
+    ensure(24);
+    doc.setFontSize(12); doc.text("Última medida de crescimento", 14, y); y += 6;
+    doc.setFontSize(10);
+    doc.text(`${new Date(lg.measuredAt).toLocaleDateString("pt-BR")}${lg.weightG ? ` · ${(lg.weightG / 1000).toFixed(2)} kg` : ""}${lg.heightCm ? ` · ${lg.heightCm} cm` : ""}${lg.headCm ? ` · PC ${lg.headCm} cm` : ""}`, 14, y); y += 8;
+  }
+  ensure(16);
+  doc.setFontSize(8); doc.setTextColor(120);
+  doc.text(doc.splitTextToSize("Este relatório é um diário elaborado pelos pais, não um documento médico ou diagnóstico. Referências: AAP, AASM, National Sleep Foundation e OMS (curva de crescimento).", 180), 14, y);
+  const blob = doc.output("blob");
+  await shareOrDownloadBlob(blob, `sono-relatorio-${dayKey(Date.now())}.pdf`, "Relatório — Sono do Joaquim");
 }
 
 /* ---------- diagnóstico ---------- */
@@ -1045,7 +1364,7 @@ function render() {
     document.querySelector(`nav [data-tab="${t}"]`).setAttribute("aria-current", S.tab === t ? "page" : "false");
   }
   if (S.tab === "hoje") renderToday();
-  else if (S.tab === "semana") renderWeek();
+  else if (S.tab === "semana") renderTrends();
   else if (S.tab === "registros") renderRecords();
   else renderGuide();
 }
@@ -1286,6 +1605,7 @@ function openSettingsDialog() {
   const settings = S.config.settings || {};
   $("#cfgFixedNaps").value = settings.fixedNaps != null ? settings.fixedNaps : "";
   $("#cfgMinWake").value = settings.minWakeHour != null ? settings.minWakeHour : "";
+  $("#cfgSex").value = settings.sex || "";
   renderShortcutsConfig();
   $("#dlgSettings").showModal();
 }
@@ -1297,8 +1617,9 @@ $("#formSettings").addEventListener("submit", () => {
   S.deviceName = deviceName; store.setMeta("deviceName", deviceName);
   const fixedNaps = $("#cfgFixedNaps").value ? Number($("#cfgFixedNaps").value) : null;
   const minWakeHour = $("#cfgMinWake").value ? Number($("#cfgMinWake").value) : null;
+  const sex = $("#cfgSex").value || null;
   setConfig({ name: $("#cfgName").value.trim() || "Bebê", birth: $("#cfgBirth").value,
-    settings: { ...S.config.settings, fixedNaps, minWakeHour } });
+    settings: { ...S.config.settings, fixedNaps, minWakeHour, sex } });
   if (wasFirstDeviceName && deviceName && !S.onboardingDone) showOnboarding();
 });
 function applyTheme(t) { if (t === "auto") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", t); }
@@ -1356,6 +1677,16 @@ document.addEventListener("click", e => {
 
   const revoke = e.target.closest("[data-revoke-token]");
   if (revoke) return revokeQuickToken(Number(revoke.dataset.revokeToken));
+
+  const grwEdit = e.target.closest("[data-growth-edit]");
+  if (grwEdit) { const g = S.growth[grwEdit.dataset.growthEdit]; if (g) openGrowth(g); return; }
+  if (e.target.closest("[data-growth-new]")) return openGrowth(null);
+
+  const period = e.target.closest("[data-trend-period]");
+  if (period) { S.trendsDays = Number(period.dataset.trendPeriod); renderTrends(); return; }
+
+  const exp = e.target.closest("[data-export]");
+  if (exp) return runExport(exp.dataset.export);
 
   const t = e.target.closest("button"); if (!t) return;
   if (t.id === "btnSleep") return toggleSleep();

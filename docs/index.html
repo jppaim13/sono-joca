@@ -114,6 +114,13 @@ h2{font-family:var(--display);font-weight:500;font-size:1.3rem;margin:18px 0 8px
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:6px}
 .summary p{margin:6px 0}
 
+/* tendências (Fase 4) */
+.chips{display:flex;gap:8px;margin:4px 0 8px}
+.chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:8px 14px;font-size:.88rem;min-height:36px}
+.chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.chart{width:100%;height:auto;display:block;margin:4px 0}
+.src{color:var(--muted);font-size:.85rem;margin:2px 0 6px}
+
 /* records */
 .rec-day{margin-top:14px}
 .rec-day h3{font-size:.95rem;color:var(--muted);margin:0 0 4px;font-weight:700}
@@ -217,7 +224,7 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 
 <nav class="tabs" id="tabs" aria-label="Seções">
   <button data-tab="hoje" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Hoje</button>
-  <button data-tab="semana"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 10h10M4 14h14M4 18h8"/></svg>Semana</button>
+  <button data-tab="semana"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 18l6-7 4 4 6-9M14 6h6v6"/></svg>Tendências</button>
   <button data-tab="registros"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>Registros</button>
   <button data-tab="guia"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>Guia</button>
 </nav>
@@ -342,6 +349,8 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   esse nome é o que aparece em "registrado por" e nos avisos de conflito.</p>
   <label for="cfgName">Nome do bebê</label><input id="cfgName" maxlength="40" required>
   <label for="cfgBirth">Data de nascimento</label><input type="date" id="cfgBirth">
+  <label for="cfgSex">Sexo (para a curva de crescimento da OMS)</label>
+  <select id="cfgSex"><option value="">Não informado</option><option value="boy">Menino</option><option value="girl">Menina</option></select>
   <label for="cfgTheme">Aparência</label>
   <select id="cfgTheme"><option value="auto">Seguir o celular</option><option value="dark">Sempre escura (melhor à noite)</option><option value="light">Sempre clara</option></select>
   <label for="cfgFixedNaps">Sonecas fixas por dia (opcional)</label>

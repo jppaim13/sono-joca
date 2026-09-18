@@ -201,6 +201,27 @@ h3{font-family:var(--display);font-weight:400}
 .guide-chapter-body p{margin:0 0 14px}
 .guide-chapter-body p:last-child{margin-bottom:0}
 .guide-chapter-body li{margin:0 0 8px}
+.tour-start-btn{display:flex;align-items:center;gap:14px;width:100%;text-align:left;padding:16px 14px;cursor:pointer;margin-bottom:14px}
+.tour-start-btn strong{display:block;font-family:var(--display);font-weight:400;font-size:1.05rem}
+.tour-start-btn small{display:block;color:var(--muted);font-size:.84rem;margin-top:2px}
+
+/* tour completo do app: destaque real na tela, sob demanda a partir do Guia */
+.tour-overlay{position:fixed;inset:0;z-index:60}
+.tour-spot{position:fixed;border-radius:16px;pointer-events:none;
+  box-shadow:0 0 0 9999px rgba(14,24,34,.72),0 0 0 3px var(--sleep-fill);
+  transition:top .2s,left .2s,width .2s,height .2s}
+.tour-overlay.centered{background:rgba(14,24,34,.72)}
+.tour-tooltip{position:fixed;max-width:min(88vw,360px);background:var(--surface);color:var(--ink);
+  border-radius:20px;padding:18px 20px;box-shadow:0 14px 36px rgba(14,24,34,.4)}
+.tour-overlay.centered .tour-tooltip{max-width:min(88vw,320px);text-align:center}
+.tour-close{position:absolute;top:6px;right:6px;width:44px;height:44px;min-height:0;border-radius:50%;border:none;
+  background:var(--surface2);color:var(--muted);font-size:.95rem;display:grid;place-items:center}
+.tour-progress{color:var(--muted);font-size:.76rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin:0 44px 6px 0}
+.tour-tooltip h3{font-family:var(--display);font-weight:400;font-size:1.15rem;margin:0 0 6px}
+.tour-tooltip p:not(.tour-progress){margin:0;font-size:.92rem;line-height:1.5}
+.tour-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:16px;flex-wrap:wrap}
+.tour-actions .btn{min-height:44px;padding:9px 14px;font-size:.85rem}
+@media (prefers-reduced-motion:reduce){.tour-spot{transition:none!important}}
 
 /* navegação */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);

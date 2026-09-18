@@ -11,7 +11,7 @@ import {
 import { VACCINE_SOURCE_NOTE, generateVaccineSchedule } from "./vaccines.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.18-refino-ui";
+const APP_VERSION = "2026.09.18-tour";
 // Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
 // a privada fica só nos secrets da Edge Function, nunca aqui).
 const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";
@@ -38,6 +38,34 @@ const ONBOARDING_SCREENS = [
   { title: "Como registrar", body: "Toque em <strong>Dormiu</strong> no centro do relógio para iniciar o cronômetro de sono, e em <strong>Acordou</strong> para parar. Peito E/D e Mamadeira ficam logo abaixo. Fralda, remédio, banho e outros ficam nos atalhos — escolha quais aparecem em Configurações." },
   { title: "Previsão × Plano", body: "O app mostra uma <strong>previsão</strong> do próximo sono, baseada na idade e, depois de alguns dias, no padrão real do bebê — não é uma regra fixa. Dá pra marcar um sono como noturno ou soneca manualmente, e ajustar horários depois." },
   { title: "Calibração", body: "Nos primeiros dias a previsão usa só a faixa típica da idade. Depois de alguns sonos nos últimos 3 dias, ela passa a seguir o padrão real do bebê — quanto mais registros, mais precisa fica." },
+];
+
+// Tour completo do app (Guia → "Tour completo do app") — diferente do onboarding acima:
+// mais longo, sob demanda, e destaca elementos de verdade na tela em vez de telas isoladas.
+// Cada passo troca de aba se precisar (`tab`) e aponta pra um elemento real (`target`, seletor
+// CSS); `target: null` é usado só na abertura/fechamento (sem destaque, cartão centralizado).
+// Passos de Configurações apontam pra engrenagem em vez de abrir o diálogo — destacar um
+// elemento dentro de um <dialog> aberto depende de como o navegador empilha o "top layer",
+// e isso eu não consigo testar aqui, então preferi o caminho mais confiável.
+const TOUR_STEPS = [
+  { tab: "hoje", target: null, title: "Tour completo do app", body: "Vamos passar por cada função, na tela de verdade. Pode fechar quando quiser, pelo X, tocando fora do cartão ou pelo botão Pular." },
+  { tab: "hoje", target: "#todayDial", title: "Relógio de 24 horas", body: "Mostra os sonos (arco azul) e os outros registros do dia, cada tipo com sua cor. Toque num registro para editar; toque num espaço vazio para adicionar um horário específico." },
+  { tab: "hoje", target: "#btnSleep", title: "Dormiu / Acordou", body: "O botão central do relógio. Toque para iniciar o cronômetro de sono, toque de novo para parar. Fica azul sólido enquanto o bebê dorme." },
+  { tab: "hoje", target: ".feedbar", title: "Mamadas", body: "Peito esquerdo, peito direito (com cronômetro) e mamadeira. O app destaca automaticamente qual peito é a vez." },
+  { tab: "hoje", target: ".moreRow", title: "Mais registros", body: "Fralda, extração de leite, remédio, banho, atividade, crescimento e agenda. Escolha quais aparecem aqui em Configurações." },
+  { tab: "hoje", target: ".stats", title: "Resumo do dia", body: "Previsão do próximo sono — que fica mais precisa depois de alguns dias de registro — e o total de sono e mamadas nas últimas 24h comparado à referência da idade." },
+  { tab: "semana", target: ".chips", title: "Tendências", body: "Veja os últimos 7, 14 ou 30 dias. Toque num período para recalcular todos os gráficos abaixo." },
+  { tab: "semana", target: "#view-semana .chart", title: "Gráficos", body: "Sono dia × noite, sonecas, despertares, horários de dormir/acordar, mamadas, fraldas, mapa de calor e curva de crescimento — um cartão por gráfico, com grade e datas." },
+  { tab: "semana", target: ".export-row", title: "Relatório e exportação", body: "Gere um PDF resumido para levar ao pediatra, ou exporte os registros do período em XLSX/CSV pela folha de compartilhamento do iPhone." },
+  { tab: "registros", target: "#view-registros h2", title: "Registros", body: "Histórico dos últimos 14 dias, agrupado por dia. Toque num registro para editar ou apagar; marque um dia como atípico (doença, viagem) para ele não pesar nas previsões." },
+  { tab: "registros", target: "#btnTrash", title: "Lixeira", body: "Registros apagados ficam guardados por 30 dias — dá para restaurar se apagar por engano." },
+  { tab: "vacinas", target: "#view-vacinas h2", title: "Vacinas", body: "O calendário é gerado sozinho a partir da data de nascimento. Toque numa vacina para marcar como aplicada, com data e nota." },
+  { tab: "guia", target: "#view-guia h2", title: "Guia", body: "Conteúdo sobre sono, amamentação e sono seguro, baseado em AAP/AASM/NSF/OMS, organizado em capítulos que abrem e fecham — e é aqui que este tour mora." },
+  { tab: "hoje", target: "#btnSettings", title: "Configurações", body: "Nome do bebê e do aparelho, data de nascimento, sexo, tema, sonecas fixas e quais atalhos aparecem na tela Hoje." },
+  { tab: "hoje", target: "#btnSettings", title: "Notificações", body: "Dentro de Configurações: ative avisos de soneca chegando, tempo desde a mamada/fralda, remédio e compromissos da agenda — cada aparelho escolhe os seus." },
+  { tab: "hoje", target: "#btnSettings", title: "Atalhos rápidos", body: "Também em Configurações: gere um token pessoal para usar com a Siri, Apple Watch, Toque nas Costas ou Central de Controle do iPhone." },
+  { tab: "hoje", target: "#btnSettings", title: "Vocês", body: "E ainda: registre o humor do dia por aparelho, e veja um lembrete gentil de revezar a madrugada." },
+  { tab: "hoje", target: null, title: "Pronto!", body: "Você já viu todas as funções. Pode voltar a qualquer momento tocando em \"Tour completo do app\", lá no Guia." },
 ];
 
 /* ---------- Supabase ---------- */
@@ -328,7 +356,7 @@ async function sync() {
     if (babyRes.data) S.config = { ...S.config, name: babyRes.data.name, birth: babyRes.data.birth || "", settings: babyRes.data.settings || {} };
     S.since = Date.now() - 5000; S.online = true;
     await persistMeta();
-    if (!document.querySelector("dialog[open]")) render(); else updateBanner();
+    if (!document.querySelector("dialog[open]") && tourIndex === -1) render(); else updateBanner();
   } catch (e) {
     S.online = false; updateBanner();
     await store.addLog({ kind: "sync-error", detail: String((e && e.message) || e) });
@@ -1591,7 +1619,11 @@ function renderGuide() {
         <tr><td>Huckleberry, Napper, Glow Baby, BabyTime</td><td>Inspiração de uso: registro com um toque, previsão de soneca, visão de 24 h, compartilhamento</td></tr>
       </table></div>` },
   ];
-  $("#view-guia").innerHTML = `<h2>Guia</h2>` + chapters.map((c, i) => `
+  const tourCardHTML = `<button type="button" class="chart tour-start-btn" id="btnStartTour">
+    <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="var(--sleep-text)" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M15 9l-2 5-5 2 2-5 5-2z"/></svg>
+    <span><strong>Tour completo do app</strong><small>Um passeio por cada função, na tela de verdade — pode fechar quando quiser</small></span>
+  </button>`;
+  $("#view-guia").innerHTML = `<h2>Guia</h2>${tourCardHTML}` + chapters.map((c, i) => `
     <details class="guide-chapter"${i === 0 ? " open" : ""}>
       <summary>${esc(c.title)}</summary>
       <div class="guide-chapter-body">${c.body}</div>
@@ -1614,9 +1646,13 @@ function render() {
   else if (S.tab === "registros") renderRecords();
   else if (S.tab === "vacinas") renderVaccines();
   else renderGuide();
+  // Qualquer render() (sync em segundo plano, resolução de conflito, o timer de 30s) recria o
+  // conteúdo da aba — se o tour estiver de pé, o alvo antigo já era. Reaponta no elemento novo
+  // em vez de deixar o destaque desalinhado ou preso num nó que não existe mais.
+  if (tourIndex >= 0) requestAnimationFrame(() => { if (tourIndex >= 0) showTourOverlay(TOUR_STEPS[tourIndex]); });
 }
 setInterval(() => { document.querySelectorAll("[data-timer]").forEach(el => el.textContent = fmtClock(Date.now() - Number(el.dataset.timer))); }, 1000);
-setInterval(() => { if (S.tab === "hoje" && !document.querySelector("dialog[open]")) render(); }, 30000);
+setInterval(() => { if (S.tab === "hoje" && tourIndex === -1 && !document.querySelector("dialog[open]")) render(); }, 30000);
 
 // iOS não roda nada em segundo plano (sem Background Sync): toda volta ao app
 // reforça a sessão, resincroniza e reconecta o Realtime, em vez de confiar em timers de fundo.
@@ -1959,6 +1995,106 @@ $("#btnObNext").addEventListener("click", () => {
 });
 $("#btnObSkip").addEventListener("click", finishOnboarding);
 
+/* ---------- tour completo do app (sob demanda, a partir do Guia) ---------- */
+let tourIndex = -1, tourReposition = null;
+function tourKeydownHandler(e) { if (e.key === "Escape") endTour(); }
+function startTour() {
+  tourIndex = 0;
+  document.addEventListener("keydown", tourKeydownHandler);
+  renderTourStep();
+}
+function endTour() {
+  tourIndex = -1;
+  removeTourOverlay();
+  document.removeEventListener("keydown", tourKeydownHandler);
+}
+function removeTourOverlay() {
+  const el = document.getElementById("tourOverlay");
+  if (el) el.remove();
+  if (tourReposition) {
+    window.removeEventListener("resize", tourReposition);
+    window.removeEventListener("scroll", tourReposition, true);
+    tourReposition = null;
+  }
+}
+function renderTourStep() {
+  const step = TOUR_STEPS[tourIndex];
+  if (!step) { endTour(); return; }
+  // Trocar de aba já dispara render(), que por sua vez reaponta o tour (ver o fim de render()).
+  // Só precisamos reapontar aqui quando a aba não muda, porque nada mais vai fazer isso.
+  if (step.tab && S.tab !== step.tab) { S.tab = step.tab; render(); }
+  else requestAnimationFrame(() => showTourOverlay(step));
+}
+function positionTourSpot(spot, targetEl) {
+  if (!targetEl) { spot.style.display = "none"; return; }
+  spot.style.display = "block";
+  const r = targetEl.getBoundingClientRect(), pad = 8;
+  spot.style.top = Math.max(0, r.top - pad) + "px";
+  spot.style.left = Math.max(0, r.left - pad) + "px";
+  spot.style.width = (r.width + pad * 2) + "px";
+  spot.style.height = (r.height + pad * 2) + "px";
+}
+function positionTourTooltip(tip, targetEl) {
+  if (!targetEl) { tip.style.top = "50%"; tip.style.left = "50%"; tip.style.transform = "translate(-50%,-50%)"; return; }
+  tip.style.transform = "none";
+  const vw = window.innerWidth, vh = window.innerHeight, margin = 14;
+  const r = targetEl.getBoundingClientRect(), tipRect = tip.getBoundingClientRect();
+  let top;
+  if (r.bottom + margin + tipRect.height < vh - 12) top = r.bottom + margin;
+  else if (r.top - margin - tipRect.height > 12) top = r.top - margin - tipRect.height;
+  else top = Math.max(12, (vh - tipRect.height) / 2);
+  const left = Math.min(Math.max(12, r.left + r.width / 2 - tipRect.width / 2), vw - tipRect.width - 12);
+  tip.style.top = top + "px";
+  tip.style.left = left + "px";
+}
+function showTourOverlay(step) {
+  removeTourOverlay();
+  const targetEl = step.target ? document.querySelector(step.target) : null;
+  if (targetEl) targetEl.scrollIntoView({ block: "center" });
+
+  const overlay = document.createElement("div");
+  overlay.id = "tourOverlay";
+  overlay.className = "tour-overlay" + (targetEl ? "" : " centered");
+
+  const spot = document.createElement("div");
+  spot.className = "tour-spot";
+  overlay.appendChild(spot);
+
+  const tip = document.createElement("div");
+  tip.className = "tour-tooltip";
+  tip.style.visibility = "hidden";
+  const isLast = tourIndex === TOUR_STEPS.length - 1;
+  tip.innerHTML = `
+    <button type="button" class="tour-close" aria-label="Fechar tour">✕</button>
+    <p class="tour-progress">${tourIndex + 1} de ${TOUR_STEPS.length}</p>
+    <h3>${esc(step.title)}</h3>
+    <p>${esc(step.body)}</p>
+    <div class="tour-actions">
+      <button type="button" class="btn ghost" id="tourSkip">Pular</button>
+      <div style="display:flex;gap:8px">
+        ${tourIndex > 0 ? `<button type="button" class="btn ghost" id="tourPrev">Anterior</button>` : ""}
+        <button type="button" class="btn primary" id="tourNext">${isLast ? "Concluir" : "Próximo"}</button>
+      </div>
+    </div>`;
+  overlay.appendChild(tip);
+  document.body.appendChild(overlay);
+
+  positionTourSpot(spot, targetEl);
+  positionTourTooltip(tip, targetEl);
+  tip.style.visibility = "visible";
+
+  overlay.addEventListener("click", e => { if (e.target === overlay) endTour(); });
+  tip.querySelector(".tour-close").addEventListener("click", endTour);
+  tip.querySelector("#tourSkip").addEventListener("click", endTour);
+  tip.querySelector("#tourNext").addEventListener("click", () => { tourIndex++; renderTourStep(); });
+  const prevBtn = tip.querySelector("#tourPrev");
+  if (prevBtn) prevBtn.addEventListener("click", () => { tourIndex--; renderTourStep(); });
+
+  tourReposition = () => { positionTourSpot(spot, targetEl); positionTourTooltip(tip, targetEl); };
+  window.addEventListener("resize", tourReposition);
+  window.addEventListener("scroll", tourReposition, true);
+}
+
 /* ---------- delegated clicks/changes ---------- */
 document.addEventListener("click", e => {
   const evEl = e.target.closest("[data-event-id]");
@@ -2010,6 +2146,7 @@ document.addEventListener("click", e => {
   if (t.dataset.edit) { const ev = events().find(x => x.id === t.dataset.edit); if (ev) openEvent(ev); return; }
   if (t.dataset.review) { const ev = S.ev[t.dataset.review]; if (ev) openEvent(ev); return; }
   if (t.id === "btnTrash") return openTrash();
+  if (t.id === "btnStartTour") return startTour();
   if (t.dataset.restore) return restoreEvent(t.dataset.restore, Number(t.dataset.version || 1));
   if (t.dataset.tab) { S.tab = t.dataset.tab; render(); window.scrollTo(0, 0); }
 });

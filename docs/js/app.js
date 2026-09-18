@@ -699,6 +699,13 @@ function upcomingAgenda() {
     .sort((a, b) => a.scheduledAt - b.scheduledAt).slice(0, 3);
 }
 
+/* ---------- cores e rótulos por tipo de registro ---------- */
+const TYPE_COLOR = { sleep: "--sleep", feed: "--feed", pump: "--t-pump", diaper: "--t-fralda",
+  medicine: "--t-med", bath: "--t-bath", activity: "--t-act" };
+const TYPE_SHORT = { sleep: "Sono", feed: "Mamada", pump: "Extração", diaper: "Fralda",
+  medicine: "Remédio", bath: "Banho", activity: "Atividade" };
+const typeVar = t => TYPE_COLOR[t] || "--muted";
+
 /* ---------- render: today ---------- */
 function polar(cx, cy, r, min) { const a = (min / 1440) * 2 * Math.PI - Math.PI / 2; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
 function arc(cx, cy, r, m1, m2) { if (m2 - m1 >= 1439.9) m2 = m1 + 1439.9;
@@ -706,34 +713,60 @@ function arc(cx, cy, r, m1, m2) { if (m2 - m1 >= 1439.9) m2 = m1 + 1439.9;
   return `M${x1.toFixed(2)} ${y1.toFixed(2)} A${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`; }
 
 function dialSVG(st) {
-  const cx = 170, cy = 170, r = 142, t0 = midnight(st.now), t1 = t0 + DAY;
+  const cx = 180, cy = 180, r = 132, t0 = midnight(st.now), t1 = t0 + DAY;
   const toM = ms => (ms - t0) / MIN;
   let segs = "";
   const list = sleeps().map(s => ({ id: s.id, start: s.start, end: s.end }));
   if (S.live.sleepStart) list.push({ id: null, start: S.live.sleepStart, end: st.now, live: true });
   for (const s of list) { const a = Math.max(s.start, t0), b = Math.min(s.end, t1); if (b <= a) continue;
-    segs += `<path d="${arc(cx, cy, r, toM(a), Math.max(toM(b), toM(a) + 3))}" stroke="var(--sleep)" stroke-width="22" fill="none" stroke-linecap="butt" ${s.live ? 'opacity=".75"' : ""} ${s.id ? `data-event-id="${esc(s.id)}" style="cursor:pointer"` : ""}/>`; }
-  let dots = "";
-  for (const f of feeds()) if (f.start >= t0 && f.start < t1) { const [x, y] = polar(cx, cy, r + 20, toM(f.start)); dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6" fill="transparent" data-event-id="${esc(f.id)}" style="cursor:pointer"/><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.5" fill="var(--feed)" style="pointer-events:none"/>`; }
+    segs += `<path d="${arc(cx, cy, r, toM(a), Math.max(toM(b), toM(a) + 3))}" stroke="var(--sleep)" stroke-width="21" fill="none" stroke-linecap="butt" ${s.live ? 'opacity=".78"' : ""} ${s.id ? `data-event-id="${esc(s.id)}" style="cursor:pointer"` : ""}/>`; }
+
+  // demais registros: corte radial atravessando a faixa do dia, uma cor por tipo
+  const marks = events().filter(e => e.type !== "sleep" && e.start >= t0 && e.start < t1);
+  let halos = "", cuts = "", hits = "";
+  for (const e of marks) {
+    const [x1, y1] = polar(cx, cy, r - 13, toM(e.start)), [x2, y2] = polar(cx, cy, r + 13, toM(e.start));
+    const coords = `x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"`;
+    halos += `<line ${coords} stroke="var(--surface)" stroke-width="6.5" stroke-linecap="round"/>`;
+    cuts += `<line ${coords} stroke="var(${typeVar(e.type)})" stroke-width="3.2" stroke-linecap="round" style="pointer-events:none"/>`;
+    hits += `<line ${coords} stroke="transparent" stroke-width="16" data-event-id="${esc(e.id)}" style="cursor:pointer"/>`;
+  }
+
   let ticks = "";
-  for (let h = 0; h < 24; h++) { const [x1, y1] = polar(cx, cy, r - 15, h * 60), [x2, y2] = polar(cx, cy, r - (h % 6 ? 19 : 24), h * 60);
-    ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="var(--muted)" stroke-width="${h % 6 ? 1 : 1.6}" opacity=".6"/>`; }
-  const labels = [[0, "0h"], [360, "6h"], [720, "12h"], [1080, "18h"]].map(([m, l]) => { const [x, y] = polar(cx, cy, r - 36, m); return `<text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle" font-size="11" fill="var(--muted)">${l}</text>`; }).join("");
-  const [hx, hy] = polar(cx, cy, r + 13, toM(st.now)), [hx2, hy2] = polar(cx, cy, r - 13, toM(st.now));
-  return `<svg id="todayDial" viewBox="0 0 340 340" role="img" aria-label="Relógio de 24 horas com os sonos e mamadas de hoje. Toque num sono ou mamada para editar; toque num espaço vazio para adicionar.">
-    <path d="${arc(cx, cy, r, 1140, 1440)}" stroke="var(--night)" stroke-width="22" fill="none"/>
-    <path d="${arc(cx, cy, r, 0, 420)}" stroke="var(--night)" stroke-width="22" fill="none"/>
-    <path d="${arc(cx, cy, r, 420, 1140)}" stroke="var(--surface)" stroke-width="22" fill="none"/>
-    <circle cx="${cx}" cy="${cy}" r="${r + 11}" fill="none" stroke="var(--line)"/>
-    <circle cx="${cx}" cy="${cy}" r="${r - 11}" fill="none" stroke="var(--line)"/>
-    ${segs}${dots}${ticks}${labels}
-    <line x1="${hx.toFixed(1)}" y1="${hy.toFixed(1)}" x2="${hx2.toFixed(1)}" y2="${hy2.toFixed(1)}" stroke="var(--ink)" stroke-width="3" stroke-linecap="round"/>
+  for (let h = 0; h < 24; h++) {
+    const major = h % 3 === 0;
+    const [x1, y1] = polar(cx, cy, major ? r + 14 : r + 18, h * 60), [x2, y2] = polar(cx, cy, r + 24, h * 60);
+    ticks += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="var(--ink)" stroke-width="${major ? 2 : 1}" opacity="${major ? .5 : .28}" stroke-linecap="round"/>`;
+  }
+  const labels = [0, 3, 6, 9, 12, 15, 18, 21].map(h => { const [x, y] = polar(cx, cy, r + 38, h * 60);
+    return `<text x="${x.toFixed(1)}" y="${(y + 4.5).toFixed(1)}" text-anchor="middle" font-family="Questrial, sans-serif" font-size="14" fill="var(--ink)" opacity=".55">${h}</text>`; }).join("");
+  const [hx, hy] = polar(cx, cy, r - 11, toM(st.now)), [hx2, hy2] = polar(cx, cy, r - 32, toM(st.now));
+  const [nx, ny] = polar(cx, cy, r, toM(st.now));
+  return `<svg id="todayDial" viewBox="0 0 360 360" role="img" aria-label="Relógio de 24 horas com os sonos e os demais registros de hoje. Toque num registro para editar; toque num espaço vazio para adicionar.">
+    <path d="${arc(cx, cy, r, 1140, 1440)}" stroke="var(--night)" stroke-width="21" fill="none"/>
+    <path d="${arc(cx, cy, r, 0, 420)}" stroke="var(--night)" stroke-width="21" fill="none"/>
+    <path d="${arc(cx, cy, r, 420, 1140)}" stroke="var(--surface)" stroke-width="21" fill="none"/>
+    <circle cx="${cx}" cy="${cy}" r="${r + 10.5}" fill="none" stroke="var(--line)"/>
+    <circle cx="${cx}" cy="${cy}" r="${r - 10.5}" fill="none" stroke="var(--line)"/>
+    ${segs}${halos}${cuts}${ticks}${labels}${hits}
+    <line x1="${hx.toFixed(1)}" y1="${hy.toFixed(1)}" x2="${hx2.toFixed(1)}" y2="${hy2.toFixed(1)}" stroke="var(--ink)" stroke-width="2.2" opacity=".45" stroke-linecap="round"/>
+    <circle cx="${nx.toFixed(1)}" cy="${ny.toFixed(1)}" r="4" fill="var(--ink)" opacity=".55"/>
   </svg>`;
+}
+// legenda do relógio: só os tipos realmente registrados no dia
+function dialLegend(st) {
+  const t0 = midnight(st.now), t1 = t0 + DAY;
+  const types = [];
+  const hasSleep = !!S.live.sleepStart || sleeps().some(s => s.end > t0 && s.start < t1);
+  if (hasSleep) types.push("sleep");
+  for (const e of events()) if (e.type !== "sleep" && e.start >= t0 && e.start < t1 && !types.includes(e.type)) types.push(e.type);
+  if (!types.length) return "";
+  return `<div class="dial-legend">${types.map(t => `<span><i class="${t === "sleep" ? "sleep" : ""}" style="background:var(${typeVar(t)})"></i>${esc(TYPE_SHORT[t] || t)}</span>`).join("")}</div>`;
 }
 function svgClickToMinutes(svgEl, clientX, clientY) {
   const rect = svgEl.getBoundingClientRect();
-  const vbX = (clientX - rect.left) / rect.width * 340, vbY = (clientY - rect.top) / rect.height * 340;
-  let angle = Math.atan2(vbY - 170, vbX - 170) + Math.PI / 2;
+  const vbX = (clientX - rect.left) / rect.width * 360, vbY = (clientY - rect.top) / rect.height * 360;
+  let angle = Math.atan2(vbY - 180, vbX - 180) + Math.PI / 2;
   if (angle < 0) angle += 2 * Math.PI;
   return Math.round((angle / (2 * Math.PI)) * 1440);
 }
@@ -819,6 +852,7 @@ function renderToday() {
                    : `<span class="verb">Dormiu</span><span class="sub">toque para iniciar</span>`}
       </button>
     </div>
+    ${dialLegend(st)}
     ${awakeLine}
     ${sleeping ? `<button class="adjust" data-adjust="sleep">Adormeceu antes? Ajustar início</button>
       <button class="adjust" id="btnPauseSleep">${isPaused ? "Retomar sono" : "Pausar (acordou um pouco)"}</button>
@@ -1114,7 +1148,7 @@ function renderRecords() {
     for (const e of groups[k]) {
       const isS = e.type === "sleep";
       const time = e.end ? `${fmtTime(e.start)}–${fmtTime(e.end)}` : fmtTime(e.start);
-      html += `<button class="rec" data-edit="${esc(e.id)}">${statusGlyph(e.id)}<span class="dot" style="background:var(${isS ? "--sleep" : "--feed"})"></span>
+      html += `<button class="rec" data-edit="${esc(e.id)}">${statusGlyph(e.id)}<span class="dot" style="background:var(${typeVar(e.type)})"></span>
         <span class="t">${time}</span><span class="x">${esc(eventTitle(e))}<small>${e.note ? esc(e.note) + " · " : ""}${e.by ? `por ${esc(nameFor(e))}` : ""}</small></span></button>`;
     }
     html += `</div>`;
@@ -1182,9 +1216,8 @@ async function openTrash() {
   const rows = data || [];
   let html = rows.length ? "" : `<p class="empty">Nada na lixeira.</p>`;
   for (const r of rows) {
-    const isS = r.type === "sleep";
     const title = eventTitle(rowToEvent(r));
-    html += `<div class="rec" style="cursor:default"><span class="dot" style="background:var(${isS ? "--sleep" : "--feed"})"></span>
+    html += `<div class="rec" style="cursor:default"><span class="dot" style="background:var(${typeVar(r.type)})"></span>
       <span class="t">${fmtTime(r.start)}</span><span class="x">${esc(title)}<small>apagado ${fmtTime(r.updated_at)}</small></span>
       <button class="btn ghost" data-restore="${esc(r.id)}" data-version="${r.version || 1}">Restaurar</button></div>`;
   }

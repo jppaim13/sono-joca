@@ -66,6 +66,9 @@ Feito:
   `diaper_after_hours`, gatilho de "dormindo desde" instantâneo e o `pg_cron` a cada 5 min.
 - **`pg_net`/`pg_cron` habilitados**, chaves VAPID geradas e configuradas como secrets, as duas Edge
   Functions (`sono-scheduler`, `sono-quick-action`) implantadas e testadas (chamada real, sem erro).
+- **Atalho "Sono status" confirmado num iPhone real**: pedir pra Siri ("Ei Siri, Sono status") chama o
+  Atalho, que chama `sono-quick-action` com o token do aparelho e a Siri fala a resposta (ex.: "Acordado
+  há 40 min") — testado de ponta a ponta com sucesso.
 
 Pendente:
 - Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo

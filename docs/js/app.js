@@ -11,7 +11,7 @@ import {
 import { VACCINE_SOURCE_NOTE, generateVaccineSchedule } from "./vaccines.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.18-redesign";
+const APP_VERSION = "2026.09.18-refino-ui";
 // Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
 // a privada fica só nos secrets da Edge Function, nunca aqui).
 const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";
@@ -848,8 +848,8 @@ function renderToday() {
     ${suggestionHTML}
     <div class="dial-wrap">${dialSVG(st)}
       <button class="dial-center ${sleeping ? "sleeping" : ""}" id="btnSleep" aria-label="${sleeping ? "Registrar que acordou" : "Registrar que dormiu"}">
-        ${sleeping ? `<span class="sub">dormindo${isPaused ? " · pausado" : ""}</span><span class="clock" data-timer="${S.live.sleepStart}">${fmtClock(st.now - S.live.sleepStart)}</span><span class="verb" style="font-size:1.05rem;margin-top:4px">Acordou</span>`
-                   : `<span class="verb">Dormiu</span><span class="sub">toque para iniciar</span>`}
+        ${sleeping ? `<span class="sub">Dormindo desde ${fmtTime(S.live.sleepStart)}${isPaused ? " · pausado" : ""}</span><span class="clock" data-timer="${S.live.sleepStart}">${fmtClock(st.now - S.live.sleepStart)}</span><span class="pill">Acordou</span>`
+                   : `<span class="pill">Dormiu</span><span class="sub">toque para iniciar</span>`}
       </button>
     </div>
     ${dialLegend(st)}
@@ -896,18 +896,40 @@ function renderWeekTimeline(days) {
     </div>`;
 }
 
-/* ---------- gráficos SVG genéricos (Fase 4) ---------- */
-const CHART_W = 320, CHART_H = 110;
+/* ---------- gráficos SVG genéricos (Fase 4/refino visual) ---------- */
+const CHART_W = 320, CHART_H = 132;
 function dayLabelShort(ms) { return new Date(ms).toLocaleDateString("pt-BR", { day: "numeric", month: "numeric" }); }
-// Barras empilhadas por dia. `getSegments(day)` devolve [{value,color}]; `topLabel(day)` texto opcional acima da barra.
-function trendBarsSVG(trend, { getSegments, topLabel, maxValue, refLines, ariaLabel }) {
-  const padL = 4, padR = 4, padT = 14, padB = 16;
+// Nuvem simples usada nos estados vazios dos gráficos (mesma família visual do fundo).
+function cloudGlyphSVG() {
+  return `<svg viewBox="0 0 64 40" width="46" height="29" aria-hidden="true" fill="none">
+    <path d="M17 30a10 10 0 0 1-1.4-19.9A13 13 0 0 1 41.6 8 9 9 0 0 1 47.5 24.6 8 8 0 0 1 46 30H17z" fill="var(--line)"/>
+  </svg>`;
+}
+// Cartão de gráfico: recebe o miolo (svg ou estado vazio) já pronto e só aplica a moldura do cartão.
+function chartCard(innerHTML) { return `<div class="chart">${innerHTML}</div>`; }
+function chartEmptyState(msg) { return `<div class="chart-empty">${cloudGlyphSVG()}<p>${esc(msg)}</p></div>`; }
+// Quantos rótulos de data cabem sem sobrepor: todas as colunas até 14 dias, senão espaçados.
+function labelStep(n) { return n <= 14 ? 1 : Math.ceil(n / 10); }
+
+// Barras empilhadas por dia, com grade e rótulo do eixo Y, e data embaixo de cada coluna (ou
+// espaçadas, em janelas longas). `getSegments(day)` devolve [{value,color}]; `topLabel(day)`
+// texto opcional acima da barra (ex.: contagem).
+function trendBarsSVG(trend, { getSegments, topLabel, maxValue, refLines, ariaLabel, valueFmt }) {
+  const padL = 24, padR = 6, padT = 10, padB = 18;
   const innerW = CHART_W - padL - padR, innerH = CHART_H - padT - padB;
-  const n = Math.max(1, trend.length), gap = n > 12 ? 2 : 4;
+  const n = Math.max(1, trend.length), gap = n > 14 ? 2 : 5;
   const bw = Math.max(2, (innerW - gap * (n - 1)) / n);
   const sums = trend.map(d => getSegments(d).reduce((s, seg) => s + seg.value, 0));
-  const max = maxValue || Math.max(1, ...sums);
-  let bars = "";
+  const max = Math.max(1, maxValue || 0, ...sums, ...((refLines || []).map(r => r.value)));
+  const fmtV = valueFmt || (v => (Math.round(v * 10) / 10).toString().replace(".", ","));
+  let grid = "";
+  for (const frac of [0, 0.5, 1]) {
+    const yy = padT + innerH - frac * innerH;
+    grid += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${(CHART_W - padR).toFixed(1)}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+      <text x="${(padL - 4).toFixed(1)}" y="${(yy + 2.8).toFixed(1)}" font-size="7.5" fill="var(--muted)" text-anchor="end">${esc(fmtV(max * frac))}</text>`;
+  }
+  let bars = "", dateLabels = "";
+  const step = labelStep(n);
   trend.forEach((d, i) => {
     const x = padL + i * (bw + gap);
     let yCursor = padT + innerH;
@@ -921,25 +943,30 @@ function trendBarsSVG(trend, { getSegments, topLabel, maxValue, refLines, ariaLa
       const lbl = topLabel(d);
       if (lbl) bars += `<text x="${(x + bw / 2).toFixed(1)}" y="${(yCursor - 3).toFixed(1)}" text-anchor="middle" font-size="7.5" fill="var(--muted)">${esc(lbl)}</text>`;
     }
+    if (i % step === 0 || i === n - 1) {
+      dateLabels += `<text x="${(x + bw / 2).toFixed(1)}" y="${(CHART_H - 5).toFixed(1)}" text-anchor="middle" font-size="7" fill="var(--muted)">${esc(dayLabelShort(d.start))}</text>`;
+    }
   });
   let refs = "";
   for (const r of (refLines || [])) {
     const yy = padT + innerH - (r.value / max) * innerH;
-    refs += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${(CHART_W - padR).toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${r.color}" stroke-width="1" stroke-dasharray="3,3"/>`;
+    refs += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${(CHART_W - padR).toFixed(1)}" y2="${yy.toFixed(1)}" stroke="${r.color}" stroke-width="1.2" stroke-dasharray="3,3"/>`;
   }
-  const firstLbl = trend[0] ? dayLabelShort(trend[0].start) : "", lastLbl = trend[n - 1] ? dayLabelShort(trend[n - 1].start) : "";
-  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="chart" role="img" aria-label="${esc(ariaLabel || "")}">
-    ${refs}${bars}
-    <text x="${padL}" y="${CHART_H - 3}" font-size="8" fill="var(--muted)">${esc(firstLbl)}</text>
-    <text x="${CHART_W - padR}" y="${CHART_H - 3}" font-size="8" fill="var(--muted)" text-anchor="end">${esc(lastLbl)}</text>
-  </svg>`;
+  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="chart-svg" role="img" aria-label="${esc(ariaLabel || "")}">${grid}${refs}${bars}${dateLabels}</svg>`;
 }
 // Pontos por dia (ex.: horário de dormir/acordar). `getValue(day)` devolve hora decimal ou null.
-function trendDotsSVG(trend, { getValue, min, max, wrapBelow, color, ariaLabel }) {
-  const padL = 4, padR = 4, padT = 8, padB = 16;
-  const innerW = CHART_W - padL - padR, innerH = 56 - padT - padB, H = 56;
+function trendDotsSVG(trend, { getValue, min, max, wrapBelow, color, ariaLabel, hourFmt }) {
+  const padL = 22, padR = 6, padT = 6, padB = 16, H = 64;
+  const innerW = CHART_W - padL - padR, innerH = H - padT - padB;
   const n = Math.max(1, trend.length), stepX = n > 1 ? innerW / (n - 1) : 0;
   const y = v => padT + innerH - ((v - min) / (max - min)) * innerH;
+  const fmtH = hourFmt || (v => `${Math.floor(((v % 24) + 24) % 24)}h`);
+  let grid = "";
+  for (const v of [min, (min + max) / 2, max]) {
+    const yy = y(v);
+    grid += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${(CHART_W - padR).toFixed(1)}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+      <text x="${(padL - 4).toFixed(1)}" y="${(yy + 2.8).toFixed(1)}" font-size="7.5" fill="var(--muted)" text-anchor="end">${esc(fmtH(v))}</text>`;
+  }
   const coords = trend.map((d, i) => {
     let v = getValue(d);
     if (v == null) return null;
@@ -947,10 +974,13 @@ function trendDotsSVG(trend, { getValue, min, max, wrapBelow, color, ariaLabel }
     v = Math.min(max, Math.max(min, v));
     return [padL + i * stepX, y(v)];
   });
+  const step = labelStep(n);
+  let dateLabels = "";
+  trend.forEach((d, i) => { if (i % step === 0 || i === n - 1) dateLabels += `<text x="${(padL + i * stepX).toFixed(1)}" y="${(H - 4).toFixed(1)}" text-anchor="middle" font-size="7" fill="var(--muted)">${esc(dayLabelShort(d.start))}</text>`; });
   let line = "";
   for (let i = 1; i < coords.length; i++) if (coords[i] && coords[i - 1]) line += `M${coords[i - 1][0].toFixed(1)},${coords[i - 1][1].toFixed(1)} L${coords[i][0].toFixed(1)},${coords[i][1].toFixed(1)} `;
-  const pts = coords.filter(Boolean).map(c => `<circle cx="${c[0].toFixed(1)}" cy="${c[1].toFixed(1)}" r="2.4" fill="${color}"/>`).join("");
-  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart" role="img" aria-label="${esc(ariaLabel || "")}"><path d="${line}" stroke="${color}" stroke-width="1.2" fill="none" opacity=".5"/>${pts}</svg>`;
+  const pts = coords.filter(Boolean).map(c => `<circle cx="${c[0].toFixed(1)}" cy="${c[1].toFixed(1)}" r="2.6" fill="${color}"/>`).join("");
+  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart-svg" role="img" aria-label="${esc(ariaLabel || "")}">${grid}<path d="${line}" stroke="${color}" stroke-width="1.2" fill="none" opacity=".5"/>${pts}${dateLabels}</svg>`;
 }
 function trendHeatmapSVG(trend) {
   const padL = 22, padT = 2, padB = 12;
@@ -965,16 +995,22 @@ function trendHeatmapSVG(trend) {
     if (r === 0 || r === trend.length - 1 || trend.length <= 10) labels += `<text x="0" y="${(padT + r * cell + cell * 0.72).toFixed(1)}" font-size="7" fill="var(--muted)">${esc(dayLabelShort(d.start))}</text>`;
   });
   const hourTicks = [0, 6, 12, 18].map(h => `<text x="${(padL + h * cell).toFixed(1)}" y="${(padT + trend.length * cell + 9).toFixed(1)}" font-size="7" fill="var(--muted)">${h}h</text>`).join("");
-  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart" role="img" aria-label="Mapa de calor de sono por hora do dia">${cells}${labels}${hourTicks}</svg>`;
+  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart-svg" role="img" aria-label="Mapa de calor de sono por hora do dia">${cells}${labels}${hourTicks}</svg>`;
 }
 function growthChartSVG(table, measurements, birthMs) {
-  const padL = 26, padR = 6, padT = 8, padB = 16, H = 150;
+  const padL = 30, padR = 6, padT = 8, padB = 16, H = 150;
   const innerW = CHART_W - padL - padR, innerH = H - padT - padB;
   const curves = WHO_PERCENTILE_LINES.map(l => ({ ...l, pts: percentileCurve(table, l.z, 1) }));
   const values = curves.flatMap(c => c.pts.map(p => p.value)).concat(measurements.map(m => m.value));
   const vMin = Math.min(...values) * 0.95, vMax = Math.max(...values) * 1.05;
   const x = m => padL + (m / 24) * innerW;
   const y = v => padT + innerH - ((v - vMin) / (vMax - vMin)) * innerH;
+  let grid = "";
+  for (const frac of [0, 0.5, 1]) {
+    const v = vMin + frac * (vMax - vMin), yy = y(v);
+    grid += `<line x1="${padL}" y1="${yy.toFixed(1)}" x2="${(CHART_W - padR).toFixed(1)}" y2="${yy.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+      <text x="${(padL - 4).toFixed(1)}" y="${(yy + 2.8).toFixed(1)}" font-size="7.5" fill="var(--muted)" text-anchor="end">${v.toFixed(1)}</text>`;
+  }
   const paths = curves.map(c => {
     const d = c.pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.ageMonths).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
     const median = c.p === 50;
@@ -985,11 +1021,10 @@ function growthChartSVG(table, measurements, birthMs) {
     if (ageM > 24) return "";
     return `<circle cx="${x(ageM).toFixed(1)}" cy="${y(m.value).toFixed(1)}" r="3" fill="var(--sleep)"/>`;
   }).join("");
-  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart" role="img" aria-label="Curva de crescimento comparada às referências da OMS">
+  return `<svg viewBox="0 0 ${CHART_W} ${H}" class="chart-svg" role="img" aria-label="Curva de crescimento comparada às referências da OMS">
+    ${grid}
     <text x="${padL}" y="${H - 3}" font-size="8" fill="var(--muted)">0 m</text>
     <text x="${CHART_W - padR}" y="${H - 3}" font-size="8" fill="var(--muted)" text-anchor="end">24 m</text>
-    <text x="${padL}" y="${(padT + 8).toFixed(1)}" font-size="7" fill="var(--muted)">${vMax.toFixed(1)}</text>
-    <text x="${padL}" y="${(padT + innerH).toFixed(1)}" font-size="7" fill="var(--muted)">${vMin.toFixed(1)}</text>
     ${paths}${dots}
   </svg>`;
 }
@@ -1012,60 +1047,79 @@ function growthSectionHTML() {
       <span class="x">${g.weightG ? `${(g.weightG / 1000).toFixed(2).replace(".", ",")} kg` : ""}${g.heightCm ? ` · ${g.heightCm} cm` : ""}${g.headCm ? ` · PC ${g.headCm} cm` : ""}
       ${pct ? `<small>peso no percentil ~${Math.round(pct.percentile)}</small>` : ""}</span></button>`;
   }).join("");
-  let chart = `<p class="empty">Adicione pelo menos um registro de peso para ver o gráfico.</p>`;
-  if (!S.config.birth) chart = `<p class="empty">Defina a data de nascimento em Configurações para ver a curva.</p>`;
-  else if (!sex) chart = `<p class="empty">Defina o sexo do bebê em Configurações para comparar com as referências da OMS.</p>`;
-  else if (!whoGrowthData) { chart = `<p class="empty">Carregando curva…</p>`; loadWhoGrowthData().then(() => { if (S.tab === "semana") render(); }); }
+  let body = chartEmptyState("Adicione pelo menos um registro de peso para ver o gráfico.");
+  if (!S.config.birth) body = chartEmptyState("Defina a data de nascimento em Configurações para ver a curva.");
+  else if (!sex) body = chartEmptyState("Defina o sexo do bebê em Configurações para comparar com a OMS.");
+  else if (!whoGrowthData) { body = chartEmptyState("Carregando curva…"); loadWhoGrowthData().then(() => { if (S.tab === "semana") render(); }); }
   else {
     const weighed = list.filter(g => g.weightG).map(g => ({ measuredAt: g.measuredAt, value: g.weightG / 1000 }));
     if (weighed.length) {
       const birthMs = new Date(S.config.birth + "T12:00:00").getTime();
-      chart = growthChartSVG(whoGrowthData.weight[sex], weighed, birthMs);
+      body = growthChartSVG(whoGrowthData.weight[sex], weighed, birthMs);
     }
   }
   return `<h2>Crescimento</h2>
-    <p class="src">Peso × referência da OMS${sex ? ` (${SEX_LABEL[sex]})` : ""} (0–24 meses; linhas P3/P15/P50/P85/P97).
-    Fonte: WHO Child Growth Standards, parâmetros LMS republicados pelo CDC/NCHS.</p>
-    ${chart}
+    <p class="src">Peso × referência da OMS${sex ? ` (${SEX_LABEL[sex]})` : ""}, linhas P3/P15/P50/P85/P97 (WHO/CDC).</p>
+    ${chartCard(body)}
     <div class="actions" style="margin-top:6px"><button type="button" class="btn ghost" data-growth-new>Adicionar medida</button></div>
     ${rowsHTML || `<p class="empty">Nenhuma medida registrada ainda.</p>`}`;
 }
+// Cores por sub-tipo de fralda/mamada — distintas entre si e das cores gerais de tipo,
+// reaproveitando a paleta já definida (evita repetir o mesmo verde em duas séries).
+const DIAPER_COLOR = { xixi: "var(--sleep)", coco: "var(--t-fralda)", ambos: "var(--t-act)" };
+const FEED_SIDE_COLOR = { "peito-e": "var(--sleep)", "peito-d": "var(--t-pump)", outros: "var(--feed)" };
 function renderTrends() {
   const trend = currentTrend();
   const ref = sleepRef(ageWeeks());
   const chips = TREND_PERIODS.map(d => `<button type="button" class="chip${S.trendsDays === d ? " on" : ""}" data-trend-period="${d}">${d} dias</button>`).join("");
   const insights = computeInsights(trend);
+  const daysWith = fn => trend.filter(fn).length;
+  const enoughData = fn => daysWith(fn) >= 3;
 
-  const sleepChart = trendBarsSVG(trend, {
+  const sleepBody = enoughData(d => d.sleepDayMin + d.sleepNightMin > 0) ? trendBarsSVG(trend, {
     ariaLabel: "Sono por dia, noite e soneca, com faixa de referência para a idade",
     getSegments: d => [{ value: d.sleepNightMin / 60, color: "var(--sleep)" }, { value: d.sleepDayMin / 60, color: "var(--sleep-soft)" }],
     refLines: [{ value: ref.min, color: "var(--ok)" }, { value: ref.max, color: "var(--ok)" }],
-  });
-  const napsChart = trendBarsSVG(trend, {
+  }) : chartEmptyState("Faltam dias de registro de sono para mostrar o gráfico.");
+
+  const napsBody = enoughData(d => d.napCount > 0) ? trendBarsSVG(trend, {
     ariaLabel: "Duração total de sonecas por dia, com a quantidade de sonecas",
     getSegments: d => [{ value: d.sleepDayMin, color: "var(--sleep-soft)" }],
     topLabel: d => d.napCount ? String(d.napCount) : "",
-  });
-  const nightChart = trendBarsSVG(trend, {
+  }) : chartEmptyState("Faltam dias de registro de sonecas para mostrar o gráfico.");
+
+  const nightBody = enoughData(d => d.longestNightMin > 0) ? trendBarsSVG(trend, {
     ariaLabel: "Maior trecho contínuo de sono à noite por dia, com o número de despertares",
     getSegments: d => [{ value: d.longestNightMin / 60, color: "var(--sleep)" }],
     topLabel: d => d.wakenings ? `${d.wakenings}⤫` : "",
-  });
-  const bedWakeChart = `<div class="legend"><span><i style="background:var(--sleep)"></i>dormiu</span><span><i style="background:var(--ok)"></i>acordou</span></div>
+  }) : chartEmptyState("Faltam noites registradas para mostrar o gráfico.");
+
+  const bedWakeBody = enoughData(d => d.bedtime != null || d.wake != null) ? `
+    <div class="legend"><span><i style="background:var(--sleep)"></i>dormiu</span><span><i style="background:var(--ok)"></i>acordou</span></div>
     ${trendDotsSVG(trend, { ariaLabel: "Horário de dormir por dia", getValue: d => d.bedtime != null ? new Date(d.bedtime).getHours() + new Date(d.bedtime).getMinutes() / 60 : null, min: 15, max: 27, wrapBelow: 12, color: "var(--sleep)" })}
-    ${trendDotsSVG(trend, { ariaLabel: "Horário de acordar por dia", getValue: d => d.wake != null ? new Date(d.wake).getHours() + new Date(d.wake).getMinutes() / 60 : null, min: 3, max: 11, color: "var(--ok)" })}`;
-  const feedChart = trendBarsSVG(trend, {
-    ariaLabel: "Mamadas por dia, por lado e tipo",
-    getSegments: d => [
-      { value: d.feedBySide["peito-e"] || 0, color: "var(--sleep)" }, { value: d.feedBySide["peito-d"] || 0, color: "var(--ok)" },
-      { value: Math.max(0, d.feedCount - (d.feedBySide["peito-e"] || 0) - (d.feedBySide["peito-d"] || 0)), color: "var(--feed)" },
-    ],
-  });
+    ${trendDotsSVG(trend, { ariaLabel: "Horário de acordar por dia", getValue: d => d.wake != null ? new Date(d.wake).getHours() + new Date(d.wake).getMinutes() / 60 : null, min: 3, max: 11, color: "var(--ok)" })}`
+    : chartEmptyState("Faltam noites completas (dormir e acordar) para mostrar o gráfico.");
+
   const avgMl = (() => { const days = trend.filter(d => d.feedMl > 0); return days.length ? Math.round(days.reduce((s, d) => s + d.feedMl, 0) / days.length) : null; })();
-  const diaperChart = trendBarsSVG(trend, {
-    ariaLabel: "Fraldas por dia, por tipo",
-    getSegments: d => [{ value: d.diaper.xixi, color: "var(--sleep)" }, { value: d.diaper.coco, color: "var(--feed)" }, { value: d.diaper.ambos, color: "var(--ok)" }],
-  });
+  const feedBody = enoughData(d => d.feedCount > 0) ? `
+    <div class="legend"><span><i style="background:${FEED_SIDE_COLOR["peito-e"]}"></i>peito E</span><span><i style="background:${FEED_SIDE_COLOR["peito-d"]}"></i>peito D</span><span><i style="background:${FEED_SIDE_COLOR.outros}"></i>mamadeira/outros</span></div>
+    ${trendBarsSVG(trend, {
+      ariaLabel: "Mamadas por dia, por lado e tipo",
+      getSegments: d => [
+        { value: d.feedBySide["peito-e"] || 0, color: FEED_SIDE_COLOR["peito-e"] }, { value: d.feedBySide["peito-d"] || 0, color: FEED_SIDE_COLOR["peito-d"] },
+        { value: Math.max(0, d.feedCount - (d.feedBySide["peito-e"] || 0) - (d.feedBySide["peito-d"] || 0)), color: FEED_SIDE_COLOR.outros },
+      ],
+    })}` : chartEmptyState("Faltam mamadas registradas para mostrar o gráfico.");
+
+  const diaperBody = enoughData(d => d.diaper.xixi + d.diaper.coco + d.diaper.ambos > 0) ? `
+    <div class="legend"><span><i style="background:${DIAPER_COLOR.xixi}"></i>xixi</span><span><i style="background:${DIAPER_COLOR.coco}"></i>cocô</span><span><i style="background:${DIAPER_COLOR.ambos}"></i>ambos</span></div>
+    ${trendBarsSVG(trend, {
+      ariaLabel: "Fraldas por dia, por tipo",
+      getSegments: d => [{ value: d.diaper.xixi, color: DIAPER_COLOR.xixi }, { value: d.diaper.coco, color: DIAPER_COLOR.coco }, { value: d.diaper.ambos, color: DIAPER_COLOR.ambos }],
+    })}` : chartEmptyState("Faltam fraldas registradas para mostrar o gráfico.");
+
+  const heatmapBody = enoughData(d => d.sleepDayMin + d.sleepNightMin > 0) ? trendHeatmapSVG(trend)
+    : chartEmptyState("Faltam dias de registro de sono para mostrar o mapa de calor.");
 
   $("#view-semana").innerHTML = `
     <h2>Tendências</h2>
@@ -1074,42 +1128,40 @@ function renderTrends() {
     ${renderWeekTimeline(Math.min(S.trendsDays, 30))}
 
     <h2>Sono: dia × noite</h2>
-    <p class="src">Faixa clara = sonecas, escura = noite. Linhas tracejadas: referência de sono total para a idade (${ref.min}–${ref.max} h, ${esc(ref.src)}).</p>
-    ${sleepChart}
+    <p class="src">Clara = soneca, escura = noite. Tracejado: referência para a idade.</p>
+    ${chartCard(sleepBody)}
 
     <h2>Sonecas</h2>
-    <p class="src">Duração total de sonecas por dia; número acima da barra é a quantidade de sonecas.</p>
-    ${napsChart}
+    <p class="src">Duração total por dia; número acima é a quantidade de sonecas.</p>
+    ${chartCard(napsBody)}
 
     <h2>Maior trecho noturno e despertares</h2>
-    <p class="src">Barra: maior sono contínuo à noite. "N⤫" acima: despertares (pausas) naquela noite.</p>
-    ${nightChart}
+    <p class="src">Maior sono contínuo à noite; "N⤫" é o número de despertares.</p>
+    ${chartCard(nightBody)}
 
     <h2>Horários de dormir e acordar</h2>
-    ${bedWakeChart}
+    ${chartCard(bedWakeBody)}
 
     <h2>Mamadas</h2>
-    <p class="src">Peito esquerdo, direito e mamadeira/outros por dia.${avgMl ? ` Média de ${avgMl} ml/dia nos dias com mamadeira registrada.` : ""}</p>
-    ${feedChart}
+    <p class="src">${avgMl ? `Média de ${avgMl} ml/dia nos dias com mamadeira.` : "Por lado e tipo."}</p>
+    ${chartCard(feedBody)}
 
     <h2>Fraldas por dia</h2>
-    <div class="legend"><span><i style="background:var(--sleep)"></i>xixi</span><span><i style="background:var(--feed)"></i>cocô</span><span><i style="background:var(--ok)"></i>ambos</span></div>
-    ${diaperChart}
+    ${chartCard(diaperBody)}
 
     <h2>Mapa de calor (sono por hora)</h2>
-    ${trendHeatmapSVG(trend)}
+    ${chartCard(heatmapBody)}
 
     ${growthSectionHTML()}
 
     <h2>Resumo</h2>
     <ul>${insights.map(i => `<li>${esc(i)}</li>`).join("")}</ul>
-    <p class="src">Isto é um diário, não um dispositivo médico. Janelas de sono e curvas de crescimento são
-    referências de prática clínica (AAP/AASM/NSF/OMS), não um diagnóstico.</p>
+    <p class="src">Diário, não dispositivo médico — referências de prática clínica (AAP/AASM/NSF/OMS).</p>
 
-    <div class="actions">
+    <div class="export-row">
       <button type="button" class="btn ghost" data-export="pdf">Relatório PDF</button>
-      <button type="button" class="btn ghost" data-export="xlsx">Exportar XLSX</button>
-      <button type="button" class="btn ghost" data-export="csv">Exportar CSV</button>
+      <button type="button" class="btn ghost" data-export="xlsx">XLSX</button>
+      <button type="button" class="btn ghost" data-export="csv">CSV</button>
     </div>`;
 }
 
@@ -1158,6 +1210,15 @@ function renderRecords() {
 }
 
 /* ---------- render: cartão de vacinas ---------- */
+// Marcador desenhado (círculo + check em SVG) em vez de emoji — verde de mamada quando aplicada,
+// contorno neutro quando pendente.
+function vaccineMarkerSVG(applied) {
+  if (applied) return `<svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
+    <circle cx="11" cy="11" r="11" fill="var(--feed-soft)"/>
+    <path d="M6.5 11.3l3 3 6-6.2" fill="none" stroke="var(--feed)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>`;
+  return `<svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true"><circle cx="11" cy="11" r="10.2" fill="none" stroke="var(--line)" stroke-width="1.6"/></svg>`;
+}
 function renderVaccines() {
   ensureVaccineSchedule();
   if (!S.config.birth) {
@@ -1166,19 +1227,26 @@ function renderVaccines() {
   }
   const list = Object.values(S.vaccines).filter(v => v && !v.deleted).sort((a, b) => a.dueAt - b.dueAt);
   const appliedCount = list.filter(v => v.applied).length;
+  const pct = list.length ? Math.round((appliedCount / list.length) * 100) : 0;
   const now = Date.now();
   const order = [], groups = {};
   for (const v of list) { if (!groups[v.ageLabel]) { groups[v.ageLabel] = []; order.push(v.ageLabel); } groups[v.ageLabel].push(v); }
   let html = `<h2>Vacinas</h2>
     <p class="src">${esc(VACCINE_SOURCE_NOTE)}</p>
-    <p>${appliedCount} de ${list.length} aplicadas.</p>`;
+    <div class="chart" style="padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+        <span style="font-family:var(--display);font-size:1.35rem">${appliedCount} de ${list.length}</span>
+        <span style="color:var(--muted);font-size:.82rem">aplicadas</span>
+      </div>
+      <div class="meter" aria-hidden="true"><div class="fill" style="width:${pct}%;background:var(--feed)"></div></div>
+    </div>`;
   for (const ageLabel of order) {
     const items = groups[ageLabel];
     html += `<h3 style="margin:16px 0 4px">${esc(ageLabel)} <small style="color:var(--muted);font-weight:400">${esc(new Date(items[0].dueAt).toLocaleDateString("pt-BR"))}</small></h3>`;
     for (const v of items) {
       const overdue = !v.applied && v.dueAt < now - 14 * DAY;
       html += `<button type="button" class="rec" data-vaccine-edit="${esc(v.id)}">
-        <span class="t" style="font-size:1.3rem;min-width:auto">${v.applied ? "✅" : "⬜"}</span>
+        <span class="t" style="min-width:auto">${vaccineMarkerSVG(v.applied)}</span>
         <span class="x">${esc(v.vaccine)}${v.doseLabel ? ` · ${esc(v.doseLabel)}` : ""}
           <span class="tag">${v.category === "sus" ? "SUS" : "Particular"}</span>${overdue ? ` <span class="tag warn">atrasada</span>` : ""}
           <small>${esc(v.protects || "")}</small></span></button>`;
@@ -1479,59 +1547,55 @@ async function revokeQuickToken(id) {
 /* ---------- render: guide ---------- */
 function renderGuide() {
   const w = ageWeeks(), ref = sleepRef(w), [lo, hi] = wakeRef(w);
-  $("#view-guia").innerHTML = `
-    <h2>Para a idade atual</h2>
-    <p>${w == null ? "Defina a data de nascimento nas configurações para personalizar." : `Com ${esc(ageText(w))}, as referências usadas pelo app são:`}</p>
-    <p>Sono total em 24 h: <strong>${ref.min} a ${ref.max} horas</strong> (${esc(ref.src)}). Tempo acordado entre sonos: <strong>${lo} a ${hi} minutos</strong>.${feedRef(w) ? ` Mamadas: <strong>8 a 12 por dia</strong>.` : ""}</p>
-
-    <h2>Como o app calcula a previsão</h2>
-    <p>A previsão do próximo sono começa pela faixa de tempo acordado típica da idade. Depois de alguns sonos registrados, ela passa a usar a mediana dos intervalos reais do bebê nos últimos 3 dias, sem sair muito da faixa da idade. É uma estimativa: os sinais do bebê (bocejar, esfregar os olhos, olhar parado, irritação) valem mais que o relógio.</p>
-    <p class="src">As faixas de sono total vêm de consensos de especialistas. As janelas de tempo acordado são usadas na prática por pediatras e consultoras de sono, mas têm pouca base em estudos controlados. Por isso o app as trata como ponto de partida ajustável, e não como regra.</p>
-
-    <h2>Sono do recém-nascido</h2>
-    <p>Nos primeiros meses o sono é distribuído ao longo do dia e da noite, em blocos curtos: os ciclos são mais curtos que os de um adulto e têm mais sono ativo (equivalente ao REM). O ritmo circadiano — o "relógio biológico" que diferencia dia e noite — ainda está imaturo e costuma se organizar entre 2 e 4 meses. Variação grande de um dia para o outro é normal; compare tendências de vários dias, não um dia isolado.</p>
-    <p class="src">National Sleep Foundation (Hirshkowitz et al., 2015); AASM (Paruthi et al., 2016).</p>
-
-    <h2>Sinais de sono</h2>
-    <p>Bocejar, esfregar os olhos, olhar parado ou desviar o olhar, puxar a orelha e ficar mais quieto ou irritado costumam aparecer antes do choro. Choro é um sinal tardio — agir nos sinais anteriores facilita o bebê pegar no sono.</p>
-
-    <h2>Ambiente</h2>
-    <p>Luz natural e atividade durante o dia, ambiente mais escuro e calmo à noite ajudam o relógio biológico a amadurecer mais rápido. Ruído branco em volume baixo e longe do berço pode ajudar a mascarar sons da casa; temperatura amena, sem cobrir demais o bebê.</p>
-
-    <h2>Rotina na hora de dormir</h2>
-    <p>Uma sequência curta e previsível antes do sono (banho, mamada, ambiente calmo, "boa noite") ajuda a sinalizar que a hora de dormir está chegando. Pode começar desde cedo; costuma ganhar consistência e efeito a partir de 6–8 semanas.</p>
-
-    <h2>Sono seguro (AAP, 2022)</h2>
-    <ul>
-      <li>Sempre de barriga para cima, em todos os sonos, inclusive sonecas.</li>
-      <li>Superfície firme e plana, com lençol ajustado. Sem travesseiros, protetores de berço, cobertores soltos ou bichos de pelúcia.</li>
-      <li>Dormir no mesmo quarto dos pais, mas em berço próprio, de preferência nos primeiros 6 meses.</li>
-      <li>Evitar deixar o bebê dormir em sofá, poltrona, cadeirinha de carro fora do carro ou superfícies inclinadas.</li>
-      <li>Evitar superaquecimento e exposição à fumaça de cigarro. Amamentação e chupeta na hora de dormir estão associadas a menor risco.</li>
-    </ul>
-    <p class="src">Moon et al., <em>Pediatrics</em>, 2022 (AAP).</p>
-
-    <h2>Regressões de sono</h2>
-    <p>É comum o sono piorar por alguns dias a poucas semanas em certas fases — perto dos 4 meses (uma mudança real e permanente na forma como o sono se organiza, não só passageira), em saltos de desenvolvimento, marcos motores (virar, sentar, engatinhar) ou dentição. Manter a rotina e as mesmas respostas costuma ajudar o sono a se reorganizar sozinho.</p>
-    <p class="src">Descrição amplamente usada na prática pediátrica e por consultoras de sono; não é um diagnóstico nem tem uma definição clínica única.</p>
-
-    <h2>Amamentação e sinais de fome</h2>
-    <p>Sinais precoces de fome: buscar o peito/mão, levar as mãos à boca, chupar os dedos, virar a cabeça procurando. Nos primeiros meses a amamentação costuma ser em livre demanda, geralmente 8 a 12 vezes em 24 h.</p>
-    <p class="src">AAP / HealthyChildren.org.</p>
-
-    <h2>Quando falar com o pediatra</h2>
-    <p>Procure orientação se o bebê estiver muito sonolento e difícil de acordar para mamar, com poucas fraldas molhadas, respirando com pausas ou esforço, com ronco constante, com o crescimento fugindo do esperado, ou se algo simplesmente parecer diferente do normal dele. Este app é um diário, não um dispositivo médico.</p>
-
-    <h2>Referências</h2>
-    <div class="scroll"><table>
-      <tr><th>Fonte</th><th>Uso no app</th></tr>
-      <tr><td>Hirshkowitz et al., <em>Sleep Health</em>, 2015 (National Sleep Foundation)</td><td>14–17 h para 0–3 meses</td></tr>
-      <tr><td>Paruthi et al., <em>J Clin Sleep Med</em>, 2016 (AASM, endossado pela AAP)</td><td>Faixas a partir de 4 meses</td></tr>
-      <tr><td>Moon et al., <em>Pediatrics</em>, 2022 (AAP, sono seguro)</td><td>Recomendações de sono seguro</td></tr>
-      <tr><td>AAP / HealthyChildren.org, orientação sobre amamentação</td><td>8–12 mamadas por dia no início; sinais de fome</td></tr>
-      <tr><td>WHO Child Growth Standards (OMS), parâmetros LMS republicados pelo CDC/NCHS</td><td>Curva de crescimento em Tendências</td></tr>
-      <tr><td>Huckleberry, Napper, Glow Baby, BabyTime</td><td>Inspiração de uso: registro com um toque, previsão de soneca, visão de 24 h, compartilhamento</td></tr>
-    </table></div>`;
+  const chapters = [
+    { title: "Para a idade atual", body: `
+      <p>${w == null ? "Defina a data de nascimento nas configurações para personalizar." : `Com ${esc(ageText(w))}, as referências usadas pelo app são:`}</p>
+      <p>Sono total em 24 h: <strong>${ref.min} a ${ref.max} horas</strong> (${esc(ref.src)}). Tempo acordado entre sonos: <strong>${lo} a ${hi} minutos</strong>.${feedRef(w) ? ` Mamadas: <strong>8 a 12 por dia</strong>.` : ""}</p>` },
+    { title: "Como o app calcula a previsão", body: `
+      <p>A previsão do próximo sono começa pela faixa de tempo acordado típica da idade. Depois de alguns sonos registrados, ela passa a usar a mediana dos intervalos reais do bebê nos últimos 3 dias, sem sair muito da faixa da idade. É uma estimativa: os sinais do bebê (bocejar, esfregar os olhos, olhar parado, irritação) valem mais que o relógio.</p>
+      <p class="src">As faixas de sono total vêm de consensos de especialistas. As janelas de tempo acordado são usadas na prática por pediatras e consultoras de sono, mas têm pouca base em estudos controlados. Por isso o app as trata como ponto de partida ajustável, e não como regra.</p>` },
+    { title: "Sono do recém-nascido", body: `
+      <p>Nos primeiros meses o sono é distribuído ao longo do dia e da noite, em blocos curtos: os ciclos são mais curtos que os de um adulto e têm mais sono ativo (equivalente ao REM). O ritmo circadiano — o "relógio biológico" que diferencia dia e noite — ainda está imaturo e costuma se organizar entre 2 e 4 meses. Variação grande de um dia para o outro é normal; compare tendências de vários dias, não um dia isolado.</p>
+      <p class="src">National Sleep Foundation (Hirshkowitz et al., 2015); AASM (Paruthi et al., 2016).</p>` },
+    { title: "Sinais de sono", body: `
+      <p>Bocejar, esfregar os olhos, olhar parado ou desviar o olhar, puxar a orelha e ficar mais quieto ou irritado costumam aparecer antes do choro. Choro é um sinal tardio — agir nos sinais anteriores facilita o bebê pegar no sono.</p>` },
+    { title: "Ambiente", body: `
+      <p>Luz natural e atividade durante o dia, ambiente mais escuro e calmo à noite ajudam o relógio biológico a amadurecer mais rápido. Ruído branco em volume baixo e longe do berço pode ajudar a mascarar sons da casa; temperatura amena, sem cobrir demais o bebê.</p>` },
+    { title: "Rotina na hora de dormir", body: `
+      <p>Uma sequência curta e previsível antes do sono (banho, mamada, ambiente calmo, "boa noite") ajuda a sinalizar que a hora de dormir está chegando. Pode começar desde cedo; costuma ganhar consistência e efeito a partir de 6–8 semanas.</p>` },
+    { title: "Sono seguro (AAP, 2022)", body: `
+      <ul>
+        <li>Sempre de barriga para cima, em todos os sonos, inclusive sonecas.</li>
+        <li>Superfície firme e plana, com lençol ajustado. Sem travesseiros, protetores de berço, cobertores soltos ou bichos de pelúcia.</li>
+        <li>Dormir no mesmo quarto dos pais, mas em berço próprio, de preferência nos primeiros 6 meses.</li>
+        <li>Evitar deixar o bebê dormir em sofá, poltrona, cadeirinha de carro fora do carro ou superfícies inclinadas.</li>
+        <li>Evitar superaquecimento e exposição à fumaça de cigarro. Amamentação e chupeta na hora de dormir estão associadas a menor risco.</li>
+      </ul>
+      <p class="src">Moon et al., <em>Pediatrics</em>, 2022 (AAP).</p>` },
+    { title: "Regressões de sono", body: `
+      <p>É comum o sono piorar por alguns dias a poucas semanas em certas fases — perto dos 4 meses (uma mudança real e permanente na forma como o sono se organiza, não só passageira), em saltos de desenvolvimento, marcos motores (virar, sentar, engatinhar) ou dentição. Manter a rotina e as mesmas respostas costuma ajudar o sono a se reorganizar sozinho.</p>
+      <p class="src">Descrição amplamente usada na prática pediátrica e por consultoras de sono; não é um diagnóstico nem tem uma definição clínica única.</p>` },
+    { title: "Amamentação e sinais de fome", body: `
+      <p>Sinais precoces de fome: buscar o peito/mão, levar as mãos à boca, chupar os dedos, virar a cabeça procurando. Nos primeiros meses a amamentação costuma ser em livre demanda, geralmente 8 a 12 vezes em 24 h.</p>
+      <p class="src">AAP / HealthyChildren.org.</p>` },
+    { title: "Quando falar com o pediatra", body: `
+      <p>Procure orientação se o bebê estiver muito sonolento e difícil de acordar para mamar, com poucas fraldas molhadas, respirando com pausas ou esforço, com ronco constante, com o crescimento fugindo do esperado, ou se algo simplesmente parecer diferente do normal dele. Este app é um diário, não um dispositivo médico.</p>` },
+    { title: "Referências", body: `
+      <div class="scroll"><table>
+        <tr><th>Fonte</th><th>Uso no app</th></tr>
+        <tr><td>Hirshkowitz et al., <em>Sleep Health</em>, 2015 (National Sleep Foundation)</td><td>14–17 h para 0–3 meses</td></tr>
+        <tr><td>Paruthi et al., <em>J Clin Sleep Med</em>, 2016 (AASM, endossado pela AAP)</td><td>Faixas a partir de 4 meses</td></tr>
+        <tr><td>Moon et al., <em>Pediatrics</em>, 2022 (AAP, sono seguro)</td><td>Recomendações de sono seguro</td></tr>
+        <tr><td>AAP / HealthyChildren.org, orientação sobre amamentação</td><td>8–12 mamadas por dia no início; sinais de fome</td></tr>
+        <tr><td>WHO Child Growth Standards (OMS), parâmetros LMS republicados pelo CDC/NCHS</td><td>Curva de crescimento em Tendências</td></tr>
+        <tr><td>Huckleberry, Napper, Glow Baby, BabyTime</td><td>Inspiração de uso: registro com um toque, previsão de soneca, visão de 24 h, compartilhamento</td></tr>
+      </table></div>` },
+  ];
+  $("#view-guia").innerHTML = `<h2>Guia</h2>` + chapters.map((c, i) => `
+    <details class="guide-chapter"${i === 0 ? " open" : ""}>
+      <summary>${esc(c.title)}</summary>
+      <div class="guide-chapter-body">${c.body}</div>
+    </details>`).join("");
 }
 
 /* ---------- render root ---------- */
@@ -1539,6 +1603,7 @@ function render() {
   $("#babyName").textContent = S.config.name || "Bebê";
   document.title = `Sono do ${S.config.name || "bebê"}`;
   $("#babyAge").textContent = ageText(ageWeeks());
+  document.querySelector("header.top").classList.toggle("compact", S.tab !== "hoje");
   updateBanner();
   for (const t of ["hoje", "semana", "registros", "vacinas", "guia"]) {
     $("#view-" + t).hidden = S.tab !== t;

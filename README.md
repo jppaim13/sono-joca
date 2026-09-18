@@ -18,7 +18,8 @@ docs/               app do celular — é o que o GitHub Pages publica
                       (time.js, validation.js, outbox.js, conflict.js, undo.js, store.js,
                       timeinput.js, sleep.js, schedule.js — motor de previsão,
                       notifications.js — decide o que avisar,
-                      trends.js — agregação de tendências e curva de crescimento OMS)
+                      trends.js — agregação de tendências e curva de crescimento OMS,
+                      vaccines.js — catálogo e cálculo do calendário de vacinas)
   data/               dados estáticos locais (who-growth-lms.json — parâmetros LMS da OMS)
   vendor/             bibliotecas de terceiros copiadas localmente (jsPDF, SheetJS/xlsx) — sem CDN
   sw.js               service worker (cache do app shell + aviso de nova versão + push)
@@ -81,15 +82,21 @@ Feito:
   [Fase 6 — agenda, conteúdo e "Vocês"](#fase-6--agenda-conteúdo-e-vocês) abaixo. Sem migração nova
   (usa `sono_agenda`/`sono_journal`, já criadas na `003_fases_1_a_6.sql`). **Com essa fase, o roteiro
   original de Fases 1–6 está concluído** (exceto a 5, pulada de propósito).
+- **Cartão de vacinas (checklist)** — pedido depois do roteiro original, ver
+  [Cartão de vacinas](#cartão-de-vacinas-checklist) abaixo. Nova migração `007_vacinas.sql`
+  (tabela `sono_vaccines`) — **aplicar e verificar antes de considerar isso pronto**.
 
 Pendente:
 - Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo
   definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
 - Ativar notificações de verdade num iPhone (só dá pra testar com o app instalado, iOS 16.4+).
-- Validar as Fases 4 e 6 num iPhone real (gráficos, relatório em PDF, exportação XLSX/CSV, curva de
-  crescimento, humor em "Vocês", aviso de conflito na agenda) — só testei em Node (lógica pura) e
-  sintaticamente; não há como abrir o Safari real neste ambiente.
+- Validar as Fases 4 e 6 e o Cartão de vacinas num iPhone real (gráficos, relatório em PDF, exportação
+  XLSX/CSV, curva de crescimento, humor em "Vocês", aviso de conflito na agenda, calendário de vacinas
+  gerado certo e marcar como aplicada) — só testei em Node (lógica pura) e sintaticamente; não há como
+  abrir o Safari real neste ambiente.
+- **Rodar a migração `007_vacinas.sql`** no Supabase (ver seção do cartão de vacinas) — sem isso a
+  aba Vacinas não funciona em produção.
 - Fase 5 (sons para dormir) — pulada por decisão sua, fica documentada como não implementada de
   propósito, não como pendência esquecida. Dá pra retomar depois se fizer falta (é praticamente só
   conteúdo/Guia, sem schema novo).
@@ -624,3 +631,59 @@ pra retomar depois, é conteúdo/Guia puro, sem schema novo.
    aparelho deve ver o registro do primeiro (conta compartilhada).
 3. Ler o Guia inteiro na tela do iPhone → conferir que nenhum capítulo estoura a largura da tela nem
    fica cortado, e que os links/fontes citadas estão legíveis.
+
+## Cartão de vacinas (checklist)
+
+Pedido depois do roteiro original de Fases 1–6, a partir do cartão de vacinas do Joaquim (Calendário
+Nacional de Vacinação/PNI 2026 + complementares recomendadas pela SBP). Em vez de só mostrar a imagem,
+virou uma **5ª aba** ("Vacinas") com checklist de verdade: o calendário é **gerado automaticamente** a
+partir da data de nascimento (Configurações), cada dose vira um item que dá pra marcar como aplicada
+(com data e nota opcional), e fica sincronizado entre os dois aparelhos como todo o resto do app.
+
+**Como funciona:**
+- `docs/js/vaccines.js` (puro, testado) tem o catálogo completo — vacina, dose, categoria (SUS/
+  particular), o que protege e a idade em que é devida — e calcula a data de cada uma somando meses de
+  calendário à data de nascimento (`addMonths`, cuidando de casos como nascer no dia 31).
+- Na primeira vez que a aba "Vacinas" é aberta (com a data de nascimento já definida), o app gera as
+  ~34 linhas do calendário e grava na tabela `sono_vaccines` — cada linha tem um `catalog_id` estável
+  (idade + vacina + dose), então gerar de novo (ou abrir no outro aparelho) nunca duplica.
+- Tocar numa vacina abre um diálogo simples: marcar "Aplicada" (com data, padrão agora) e uma nota
+  opcional (lote, posto, reação). Tudo passa pelo mesmo outbox/conflito de versão da Fase 0.
+- Doses não aplicadas e vencidas há mais de 14 dias ganham uma etiqueta discreta "atrasada" — sem
+  alarme, só um lembrete visual.
+- **Correção em relação à imagem original:** a coluna "protege contra" da Meningocócica ACWY no seu
+  print estava copiada da Meningocócica B por engano (dizia só "sorogrupo B"). O app usa o dado correto:
+  a ACWY protege contra os sorogrupos **A, C, W e Y**.
+
+**Simplificações assumidas:**
+- Virou uma aba nova de verdade (5ª, não um dialog em Configurações) porque foi o que você pediu
+  explicitamente — diferente da "Vocês" da Fase 6, que o pedido original marcava como opcional.
+- Algumas células da imagem eram genéricas ("Complementações conforme esquema e orientação do
+  pediatra", "Outras conforme calendário") em vez de uma vacina específica — viraram itens únicos de
+  checklist com nome descritivo, em vez de tentar adivinhar uma vacina concreta que a imagem não nomeia.
+- Datas somam meses de calendário a partir do nascimento (ex.: "2 meses" = nascimento + 2 meses no
+  calendário, não uma média de dias) — é como pediatras e cadernetas de vacinação contam.
+- **O app não é uma fonte de verdade médica para isso** — a mesma observação que já estava na sua
+  imagem original ("confirme na UBS disponível") vale aqui: o calendário oficial e as marcas
+  disponíveis mudam, sempre confira com o pediatra e a caderneta física.
+- Não criei uma tela de "todas as vacinas atrasadas" separada nem notificação push para vacina
+  vencendo — dá pra adicionar depois reaproveitando `sono-scheduler` (Fase 3) se fizer falta.
+
+## Checklist local (Cartão de vacinas, Chrome/`localhost`)
+
+1. Definir a data de nascimento em Configurações (se ainda não tiver) → abrir a aba "Vacinas" → deve
+   gerar o calendário completo agrupado por idade, com as datas certas.
+2. Tocar numa vacina → marcar "Aplicada" → salvar → deve aparecer com ✅ e sair da lista de pendentes.
+3. Reabrir a aba → o total "X de Y aplicadas" deve refletir a marcação.
+4. Trocar a data de nascimento em Configurações para uma data bem no passado → reabrir "Vacinas" → itens
+   antigos não aplicados devem mostrar a etiqueta "atrasada".
+5. Recarregar a página → o calendário não deve duplicar (mesmas ~34 linhas, não 68).
+
+## Roteiro de testes manuais (Cartão de vacinas, no iPhone real)
+
+1. Abrir "Vacinas" nos dois iPhones → os dois devem ver exatamente o mesmo calendário (mesma
+   quantidade de itens, sem duplicação).
+2. Marcar uma vacina como aplicada num aparelho → o outro deve atualizar sozinho (Realtime) mostrando
+   ✅ e a data.
+3. Conferir que a aba cabe bem na barra inferior de navegação (5 abas agora) sem cortar texto nem
+   ficar apertada demais para tocar com o polegar.

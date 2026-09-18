@@ -8,9 +8,10 @@ import { ageWakeWindowRef, dailySleepRefHours, computeSchedule } from "./schedul
 import {
   buildTrend, computeInsights, ageMonthsExact, growthPoint, percentileCurve, WHO_PERCENTILE_LINES, nightShiftCounts,
 } from "./trends.js";
+import { VACCINE_SOURCE_NOTE, generateVaccineSchedule } from "./vaccines.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.18-fase6";
+const APP_VERSION = "2026.09.18-vacinas";
 // Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
 // a privada fica só nos secrets da Edge Function, nunca aqui).
 const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";
@@ -45,9 +46,9 @@ const loadSbConfig = () => { try { return JSON.parse(localStorage.getItem(SB_CON
 const saveSbConfig = v => { try { localStorage.setItem(SB_CONFIG_KEY, JSON.stringify(v)); } catch {} };
 let sb = null;
 
-const S = { config: { name: "Joaquim", birth: "", settings: {} }, live: { version: 1, pauses: [] }, ev: {}, growth: {}, agenda: {}, journal: {},
+const S = { config: { name: "Joaquim", birth: "", settings: {} }, live: { version: 1, pauses: [] }, ev: {}, growth: {}, agenda: {}, journal: {}, vaccines: {},
   users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "", onboardingDone: false, trendsDays: 7 };
-let editing = null, adjusting = null, editingGrowth = null, editingAgenda = null, editingJournal = null;
+let editing = null, adjusting = null, editingGrowth = null, editingAgenda = null, editingJournal = null, editingVaccine = null;
 let pendingSave = null, pendingOverlapId = null, pendingOverlapVersion = 1;
 let obStep = 0;
 let outboxCache = [];
@@ -145,6 +146,7 @@ async function loadLocal() {
   S.growth = (await store.getMeta("growth")) || {};
   S.agenda = (await store.getMeta("agenda")) || {};
   S.journal = (await store.getMeta("journal")) || {};
+  S.vaccines = (await store.getMeta("vaccines")) || {};
   outboxCache = await store.getOutbox();
 }
 async function persistMeta() {
@@ -158,6 +160,7 @@ async function persistCollections() {
   await store.setMeta("growth", S.growth);
   await store.setMeta("agenda", S.agenda);
   await store.setMeta("journal", S.journal);
+  await store.setMeta("vaccines", S.vaccines);
 }
 
 function events() {
@@ -197,6 +200,9 @@ const rowToAgenda = r => ({ id: r.id, kind: r.kind, title: r.title, scheduledAt:
   completed: !!r.completed, by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
 const rowToJournal = r => ({ id: r.id, at: r.at, mood: r.mood, note: r.note,
   by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
+const rowToVaccine = r => ({ id: r.id, catalogId: r.catalog_id, ageLabel: r.age_label, dueAt: r.due_at, vaccine: r.vaccine,
+  doseLabel: r.dose_label, category: r.category, protects: r.protects, applied: !!r.applied, appliedAt: r.applied_at, note: r.note,
+  by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
 // Mapeia o formato local (rowToEvent/rowToLive/rowToGrowth/rowToAgenda) para o que resolveEditorName espera do banco.
 const nameFor = obj => resolveEditorName({ device_name: obj.deviceName, last_edited_by: obj.lastEditedBy, by_user_id: obj.by || obj.sleepBy || obj.feedBy }, S.users);
 
@@ -221,6 +227,7 @@ const TABLE_LOCAL = {
   sono_growth: { map: S => S.growth, toLocal: rowToGrowth },
   sono_agenda: { map: S => S.agenda, toLocal: rowToAgenda },
   sono_journal: { map: S => S.journal, toLocal: rowToJournal },
+  sono_vaccines: { map: S => S.vaccines, toLocal: rowToVaccine },
 };
 
 async function handleConflict(op) {
@@ -297,7 +304,7 @@ async function sync() {
   if (outboxCache.length) return;
   try {
     const cutoff = Date.now() - HISTORY_DAYS * DAY;
-    const [evRes, liveRes, babyRes, profRes, growthRes, agendaRes, journalRes] = await Promise.all([
+    const [evRes, liveRes, babyRes, profRes, growthRes, agendaRes, journalRes, vaccinesRes] = await Promise.all([
       sb.from("events").select("*").gt("updated_at", S.since).gte("start", cutoff).order("start"),
       sb.from("live_state").select("*").eq("id", 1).maybeSingle(),
       sb.from("baby").select("*").eq("id", 1).maybeSingle(),
@@ -305,14 +312,16 @@ async function sync() {
       sb.from("sono_growth").select("*").gt("updated_at", S.since),
       sb.from("sono_agenda").select("*").gt("updated_at", S.since),
       sb.from("sono_journal").select("*").gt("updated_at", S.since),
+      sb.from("sono_vaccines").select("*").gt("updated_at", S.since),
     ]);
-    for (const r of [evRes, liveRes, babyRes, profRes, growthRes, agendaRes, journalRes]) if (r.error) throw r.error;
+    for (const r of [evRes, liveRes, babyRes, profRes, growthRes, agendaRes, journalRes, vaccinesRes]) if (r.error) throw r.error;
     for (const r of evRes.data) { S.ev[r.id] = rowToEvent(r); await store.putEventRow(S.ev[r.id]); }
     const cut2 = Date.now() - HISTORY_DAYS * DAY;
     for (const id in S.ev) if (S.ev[id].start < cut2) { delete S.ev[id]; await store.deleteEventRow(id); }
     for (const r of growthRes.data) S.growth[r.id] = rowToGrowth(r);
     for (const r of agendaRes.data) S.agenda[r.id] = rowToAgenda(r);
     for (const r of journalRes.data) S.journal[r.id] = rowToJournal(r);
+    for (const r of vaccinesRes.data) S.vaccines[r.id] = rowToVaccine(r);
     await persistCollections();
     S.users = {}; for (const p of profRes.data) S.users[p.id] = p.name;
     S.live = liveRes.data ? rowToLive(liveRes.data) : { version: 1, pauses: [] };
@@ -459,6 +468,42 @@ async function deleteJournalNow(id, expectedVersion) {
   if (S.journal[id]) S.journal[id] = { ...S.journal[id], deleted: true };
   await persistCollections();
   await enqueue({ kind: "cond-update", table: "sono_journal", id, patch, expectedVersion });
+}
+
+/* ---------- writes: cartão de vacinas ---------- */
+// Gera o calendário (a partir de baby.birth) na primeira vez que a aba é aberta, e de novo sempre que
+// faltar algum item novo do catálogo — nunca duplica, porque casa por `catalogId` antes de inserir.
+let generatingVaccineSchedule = false;
+async function ensureVaccineSchedule() {
+  if (!S.config.birth || generatingVaccineSchedule) return;
+  const birthMs = new Date(S.config.birth + "T12:00:00").getTime();
+  const existingIds = new Set(Object.values(S.vaccines).map(v => v.catalogId));
+  const missing = generateVaccineSchedule(birthMs).filter(v => !existingIds.has(v.catalogId));
+  if (!missing.length) return;
+  generatingVaccineSchedule = true;
+  try {
+    const now = Date.now();
+    for (const item of missing) {
+      const row = { id: uidGen(), catalog_id: item.catalogId, age_label: item.ageLabel, due_at: item.dueAt,
+        vaccine: item.vaccine, dose_label: item.doseLabel || null, category: item.category, protects: item.protects || null,
+        applied: false, applied_at: null, note: null, by_user_id: S.uid, deleted: false, updated_at: now, version: 1 };
+      S.vaccines[row.id] = rowToVaccine(row);
+      await enqueue({ kind: "insert", table: "sono_vaccines", row });
+    }
+    await persistCollections(); render();
+  } finally { generatingVaccineSchedule = false; }
+}
+function vaccinePatch(rec, now) {
+  return { applied: !!rec.applied, applied_at: rec.applied ? (rec.appliedAt || now) : null, note: rec.note || null,
+    updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+}
+async function putEditedVaccine(rec, expectedVersion) {
+  const now = Date.now();
+  const patch = vaccinePatch(rec, now);
+  S.vaccines[rec.id] = { ...S.vaccines[rec.id], applied: patch.applied, appliedAt: patch.applied_at, note: patch.note,
+    lastEditedBy: S.uid, deviceName: S.deviceName || null, version: expectedVersion + 1 };
+  await persistCollections(); render();
+  await enqueue({ kind: "cond-update", table: "sono_vaccines", id: rec.id, patch, expectedVersion });
 }
 
 /* ---------- live_state (cronômetro + pausas) ---------- */
@@ -1078,6 +1123,57 @@ function renderRecords() {
   $("#view-registros").innerHTML = html;
 }
 
+/* ---------- render: cartão de vacinas ---------- */
+function renderVaccines() {
+  ensureVaccineSchedule();
+  if (!S.config.birth) {
+    $("#view-vacinas").innerHTML = `<h2>Vacinas</h2><p class="empty">Defina a data de nascimento em Configurações para gerar o calendário de vacinas.</p>`;
+    return;
+  }
+  const list = Object.values(S.vaccines).filter(v => v && !v.deleted).sort((a, b) => a.dueAt - b.dueAt);
+  const appliedCount = list.filter(v => v.applied).length;
+  const now = Date.now();
+  const order = [], groups = {};
+  for (const v of list) { if (!groups[v.ageLabel]) { groups[v.ageLabel] = []; order.push(v.ageLabel); } groups[v.ageLabel].push(v); }
+  let html = `<h2>Vacinas</h2>
+    <p class="src">${esc(VACCINE_SOURCE_NOTE)}</p>
+    <p>${appliedCount} de ${list.length} aplicadas.</p>`;
+  for (const ageLabel of order) {
+    const items = groups[ageLabel];
+    html += `<h3 style="margin:16px 0 4px">${esc(ageLabel)} <small style="color:var(--muted);font-weight:400">${esc(new Date(items[0].dueAt).toLocaleDateString("pt-BR"))}</small></h3>`;
+    for (const v of items) {
+      const overdue = !v.applied && v.dueAt < now - 14 * DAY;
+      html += `<button type="button" class="rec" data-vaccine-edit="${esc(v.id)}">
+        <span class="t" style="font-size:1.3rem;min-width:auto">${v.applied ? "✅" : "⬜"}</span>
+        <span class="x">${esc(v.vaccine)}${v.doseLabel ? ` · ${esc(v.doseLabel)}` : ""}
+          <span class="tag">${v.category === "sus" ? "SUS" : "Particular"}</span>${overdue ? ` <span class="tag warn">atrasada</span>` : ""}
+          <small>${esc(v.protects || "")}</small></span></button>`;
+    }
+  }
+  $("#view-vacinas").innerHTML = html;
+}
+function openVaccine(v) {
+  editingVaccine = v;
+  $("#vacTitle").textContent = `${v.vaccine}${v.doseLabel ? ` · ${v.doseLabel}` : ""}`;
+  $("#vacProtects").textContent = v.protects || "";
+  $("#vacDue").textContent = `Prevista para ${new Date(v.dueAt).toLocaleDateString("pt-BR")} (${v.ageLabel}) · ${v.category === "sus" ? "SUS" : "Particular"}`;
+  $("#vacApplied").checked = !!v.applied;
+  $("#vacAppliedWhen").value = toInput(v.appliedAt || Date.now());
+  $("#vacAppliedWhenWrap").hidden = !v.applied;
+  $("#vacNote").value = v.note || "";
+  $("#dlgVaccine").showModal();
+}
+$("#vacApplied").addEventListener("change", () => { $("#vacAppliedWhenWrap").hidden = !$("#vacApplied").checked; });
+$("#formVaccine").addEventListener("submit", () => {
+  if (!editingVaccine) return;
+  const applied = $("#vacApplied").checked;
+  const rec = { id: editingVaccine.id, applied, appliedAt: applied ? fromInput($("#vacAppliedWhen").value) || Date.now() : null,
+    note: $("#vacNote").value.trim() || null };
+  putEditedVaccine(rec, editingVaccine.version || 1);
+  toast(applied ? "Marcada como aplicada." : "Atualizado.");
+  editingVaccine = null;
+});
+
 /* ---------- lixeira ---------- */
 async function openTrash() {
   const cutoff = Date.now() - 30 * DAY;
@@ -1411,13 +1507,14 @@ function render() {
   document.title = `Sono do ${S.config.name || "bebê"}`;
   $("#babyAge").textContent = ageText(ageWeeks());
   updateBanner();
-  for (const t of ["hoje", "semana", "registros", "guia"]) {
+  for (const t of ["hoje", "semana", "registros", "vacinas", "guia"]) {
     $("#view-" + t).hidden = S.tab !== t;
     document.querySelector(`nav [data-tab="${t}"]`).setAttribute("aria-current", S.tab === t ? "page" : "false");
   }
   if (S.tab === "hoje") renderToday();
   else if (S.tab === "semana") renderTrends();
   else if (S.tab === "registros") renderRecords();
+  else if (S.tab === "vacinas") renderVaccines();
   else renderGuide();
 }
 setInterval(() => { document.querySelectorAll("[data-timer]").forEach(el => el.textContent = fmtClock(Date.now() - Number(el.dataset.timer))); }, 1000);
@@ -1794,6 +1891,9 @@ document.addEventListener("click", e => {
   const jrnEdit = e.target.closest("[data-journal-edit]");
   if (jrnEdit) { const j = S.journal[jrnEdit.dataset.journalEdit]; if (j) openJournal(j); return; }
 
+  const vacEdit = e.target.closest("[data-vaccine-edit]");
+  if (vacEdit) { const v = S.vaccines[vacEdit.dataset.vaccineEdit]; if (v) openVaccine(v); return; }
+
   const period = e.target.closest("[data-trend-period]");
   if (period) { S.trendsDays = Number(period.dataset.trendPeriod); renderTrends(); return; }
 
@@ -1832,6 +1932,7 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "sono_growth" }, () => sync())
     .on("postgres_changes", { event: "*", schema: "public", table: "sono_agenda" }, () => sync())
     .on("postgres_changes", { event: "*", schema: "public", table: "sono_journal" }, () => sync())
+    .on("postgres_changes", { event: "*", schema: "public", table: "sono_vaccines" }, () => sync())
     .subscribe(status => {
       realtimeStatus = status;
       if (status === "SUBSCRIBED") {

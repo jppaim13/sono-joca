@@ -144,10 +144,10 @@ h2{font-family:var(--display);font-weight:500;font-size:1.3rem;margin:18px 0 8px
 
 /* nav */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--line);
-  display:grid;grid-template-columns:repeat(4,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:5}
-nav.tabs button{background:none;border:none;padding:10px 0 12px;font-size:.82rem;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px}
+  display:grid;grid-template-columns:repeat(5,1fr);padding-bottom:env(safe-area-inset-bottom);z-index:5}
+nav.tabs button{background:none;border:none;padding:10px 2px 12px;font-size:.72rem;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:2px;min-height:44px}
 nav.tabs button[aria-current="page"]{color:var(--ink);font-weight:700}
-nav.tabs svg{width:22px;height:22px}
+nav.tabs svg{width:20px;height:20px}
 
 /* dialog */
 dialog{border:none;border-radius:18px;padding:0;width:min(92vw,440px);max-height:85vh;background:var(--surface);color:var(--ink)}
@@ -221,6 +221,7 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   <main id="view-hoje"></main>
   <main id="view-semana" hidden></main>
   <main id="view-registros" hidden></main>
+  <main id="view-vacinas" hidden></main>
   <main id="view-guia" hidden class="guide"></main>
 </div>
 
@@ -228,6 +229,7 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   <button data-tab="hoje" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Hoje</button>
   <button data-tab="semana"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 18l6-7 4 4 6-9M14 6h6v6"/></svg>Tendências</button>
   <button data-tab="registros"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>Registros</button>
+  <button data-tab="vacinas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l7 3.2v5.3c0 5-3.2 7.7-7 9.2-3.8-1.5-7-4.2-7-9.2V6.2L12 3z"/><path d="M9 12l2 2 4-4"/></svg>Vacinas</button>
   <button data-tab="guia"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>Guia</button>
 </nav>
 
@@ -320,6 +322,20 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   <label for="agNote">Observação</label><input id="agNote" maxlength="200" placeholder="Opcional">
   <div class="actions">
     <button type="button" class="btn danger" id="agDelete" hidden>Apagar</button>
+    <span class="spacer"></span>
+    <button type="button" class="btn ghost" data-close>Cancelar</button>
+    <button type="submit" class="btn primary">Salvar</button>
+  </div>
+</form></dialog>
+
+<dialog id="dlgVaccine"><form method="dialog" id="formVaccine">
+  <h2 id="vacTitle">Vacina</h2>
+  <p id="vacProtects" style="color:var(--muted);font-size:.9rem;margin:0"></p>
+  <p id="vacDue" style="color:var(--muted);font-size:.85rem;margin:6px 0 0"></p>
+  <label style="display:flex;align-items:center;gap:8px;margin-top:14px"><input type="checkbox" id="vacApplied" style="width:auto"> Aplicada</label>
+  <div id="vacAppliedWhenWrap"><label for="vacAppliedWhen">Aplicada em</label><input type="datetime-local" id="vacAppliedWhen"></div>
+  <label for="vacNote">Nota (opcional)</label><input id="vacNote" maxlength="200" placeholder="Lote, posto, reação...">
+  <div class="actions">
     <span class="spacer"></span>
     <button type="button" class="btn ghost" data-close>Cancelar</button>
     <button type="submit" class="btn primary">Salvar</button>

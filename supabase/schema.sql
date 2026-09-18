@@ -97,6 +97,27 @@ create table public.sono_journal (
 );
 create index sono_journal_at_idx on public.sono_journal (at);
 
+create table public.sono_vaccines (
+  id text primary key check (id ~ '^[a-z0-9]{6,40}$'),
+  catalog_id text not null unique,
+  age_label text not null,
+  due_at bigint not null,
+  vaccine text not null,
+  dose_label text,
+  category text not null check (category in ('sus', 'particular')),
+  protects text,
+  applied boolean not null default false,
+  applied_at bigint,
+  note varchar(200),
+  by_user_id uuid references auth.users(id),
+  last_edited_by uuid references auth.users(id),
+  device_name text,
+  deleted boolean not null default false,
+  updated_at bigint not null,
+  version integer not null default 1
+);
+create index sono_vaccines_due_idx on public.sono_vaccines (due_at);
+
 create table public.sono_push_subscriptions (
   id bigint generated always as identity primary key,
   device_name text not null,
@@ -157,6 +178,7 @@ alter table public.events enable row level security;
 alter table public.sono_growth enable row level security;
 alter table public.sono_agenda enable row level security;
 alter table public.sono_journal enable row level security;
+alter table public.sono_vaccines enable row level security;
 alter table public.sono_push_subscriptions enable row level security;
 alter table public.sono_notification_prefs enable row level security;
 alter table public.sono_notification_log enable row level security;
@@ -176,6 +198,8 @@ create policy "authenticated full access" on public.sono_agenda for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "authenticated full access" on public.sono_journal for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+create policy "authenticated full access" on public.sono_vaccines for all
+  using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "authenticated full access" on public.sono_push_subscriptions for all
   using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "authenticated full access" on public.sono_notification_prefs for all
@@ -188,4 +212,5 @@ create policy "authenticated full access" on public.sono_quick_tokens for all
 -- Realtime: sonos/mamadas/cronômetro/crescimento/agenda/humor atualizam quase na hora
 -- entre os dois celulares. Tabelas de sistema (push, tokens, prefs, log) ficam fora.
 alter publication supabase_realtime add table
-  public.events, public.live_state, public.sono_growth, public.sono_agenda, public.sono_journal;
+  public.events, public.live_state, public.sono_growth, public.sono_agenda, public.sono_journal,
+  public.sono_vaccines;

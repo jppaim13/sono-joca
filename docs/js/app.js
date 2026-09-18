@@ -6,11 +6,11 @@ import { parseDigitsToTime, offsetFromNow } from "./timeinput.js";
 import { netSleepDuration, classifySleep, findSleepOverlap } from "./sleep.js";
 import { ageWakeWindowRef, dailySleepRefHours, computeSchedule } from "./schedule.js";
 import {
-  buildTrend, computeInsights, ageMonthsExact, growthPoint, percentileCurve, WHO_PERCENTILE_LINES,
+  buildTrend, computeInsights, ageMonthsExact, growthPoint, percentileCurve, WHO_PERCENTILE_LINES, nightShiftCounts,
 } from "./trends.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.18-fase4";
+const APP_VERSION = "2026.09.18-fase6";
 // Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
 // a privada fica só nos secrets da Edge Function, nunca aqui).
 const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";
@@ -19,6 +19,7 @@ const DIAPER_LABEL = { "xixi": "Xixi", "coco": "Cocô", "ambos": "Xixi e cocô" 
 const PLACE_LABEL = { berco: "berço", colo: "colo", carrinho: "carrinho", carro: "carro", sling: "sling" };
 const MILK_LABEL = { formula: "fórmula", materno: "materno ordenhado", misto: "misto" };
 const AGENDA_KIND_LABEL = { consulta: "Consulta", vacina: "Vacina", banho: "Banho", passeio: "Passeio", outro: "Compromisso" };
+const MOOD_EMOJI = { 1: "😞", 2: "😕", 3: "😐", 4: "🙂", 5: "😄" };
 const SEX_LABEL = { boy: "Menino", girl: "Menina" };
 const TREND_PERIODS = [7, 14, 30];
 const HISTORY_DAYS = 60;
@@ -44,9 +45,9 @@ const loadSbConfig = () => { try { return JSON.parse(localStorage.getItem(SB_CON
 const saveSbConfig = v => { try { localStorage.setItem(SB_CONFIG_KEY, JSON.stringify(v)); } catch {} };
 let sb = null;
 
-const S = { config: { name: "Joaquim", birth: "", settings: {} }, live: { version: 1, pauses: [] }, ev: {}, growth: {}, agenda: {},
+const S = { config: { name: "Joaquim", birth: "", settings: {} }, live: { version: 1, pauses: [] }, ev: {}, growth: {}, agenda: {}, journal: {},
   users: {}, since: 0, uid: null, tab: "hoje", online: true, deviceName: "", onboardingDone: false, trendsDays: 7 };
-let editing = null, adjusting = null, editingGrowth = null, editingAgenda = null;
+let editing = null, adjusting = null, editingGrowth = null, editingAgenda = null, editingJournal = null;
 let pendingSave = null, pendingOverlapId = null, pendingOverlapVersion = 1;
 let obStep = 0;
 let outboxCache = [];
@@ -143,6 +144,7 @@ async function loadLocal() {
   S.onboardingDone = (await store.getMeta("onboardingDone")) || false;
   S.growth = (await store.getMeta("growth")) || {};
   S.agenda = (await store.getMeta("agenda")) || {};
+  S.journal = (await store.getMeta("journal")) || {};
   outboxCache = await store.getOutbox();
 }
 async function persistMeta() {
@@ -155,6 +157,7 @@ async function persistMeta() {
 async function persistCollections() {
   await store.setMeta("growth", S.growth);
   await store.setMeta("agenda", S.agenda);
+  await store.setMeta("journal", S.journal);
 }
 
 function events() {
@@ -192,6 +195,8 @@ const rowToGrowth = r => ({ id: r.id, measuredAt: r.measured_at, weightG: r.weig
   by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
 const rowToAgenda = r => ({ id: r.id, kind: r.kind, title: r.title, scheduledAt: r.scheduled_at, durationMin: r.duration_min, note: r.note,
   completed: !!r.completed, by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
+const rowToJournal = r => ({ id: r.id, at: r.at, mood: r.mood, note: r.note,
+  by: r.by_user_id, lastEditedBy: r.last_edited_by, deviceName: r.device_name, deleted: !!r.deleted, version: r.version || 1 });
 // Mapeia o formato local (rowToEvent/rowToLive/rowToGrowth/rowToAgenda) para o que resolveEditorName espera do banco.
 const nameFor = obj => resolveEditorName({ device_name: obj.deviceName, last_edited_by: obj.lastEditedBy, by_user_id: obj.by || obj.sleepBy || obj.feedBy }, S.users);
 
@@ -215,6 +220,7 @@ const TABLE_LOCAL = {
   events: { map: S => S.ev, toLocal: rowToEvent },
   sono_growth: { map: S => S.growth, toLocal: rowToGrowth },
   sono_agenda: { map: S => S.agenda, toLocal: rowToAgenda },
+  sono_journal: { map: S => S.journal, toLocal: rowToJournal },
 };
 
 async function handleConflict(op) {
@@ -291,20 +297,22 @@ async function sync() {
   if (outboxCache.length) return;
   try {
     const cutoff = Date.now() - HISTORY_DAYS * DAY;
-    const [evRes, liveRes, babyRes, profRes, growthRes, agendaRes] = await Promise.all([
+    const [evRes, liveRes, babyRes, profRes, growthRes, agendaRes, journalRes] = await Promise.all([
       sb.from("events").select("*").gt("updated_at", S.since).gte("start", cutoff).order("start"),
       sb.from("live_state").select("*").eq("id", 1).maybeSingle(),
       sb.from("baby").select("*").eq("id", 1).maybeSingle(),
       sb.from("profiles").select("id,name"),
       sb.from("sono_growth").select("*").gt("updated_at", S.since),
       sb.from("sono_agenda").select("*").gt("updated_at", S.since),
+      sb.from("sono_journal").select("*").gt("updated_at", S.since),
     ]);
-    for (const r of [evRes, liveRes, babyRes, profRes, growthRes, agendaRes]) if (r.error) throw r.error;
+    for (const r of [evRes, liveRes, babyRes, profRes, growthRes, agendaRes, journalRes]) if (r.error) throw r.error;
     for (const r of evRes.data) { S.ev[r.id] = rowToEvent(r); await store.putEventRow(S.ev[r.id]); }
     const cut2 = Date.now() - HISTORY_DAYS * DAY;
     for (const id in S.ev) if (S.ev[id].start < cut2) { delete S.ev[id]; await store.deleteEventRow(id); }
     for (const r of growthRes.data) S.growth[r.id] = rowToGrowth(r);
     for (const r of agendaRes.data) S.agenda[r.id] = rowToAgenda(r);
+    for (const r of journalRes.data) S.journal[r.id] = rowToJournal(r);
     await persistCollections();
     S.users = {}; for (const p of profRes.data) S.users[p.id] = p.name;
     S.live = liveRes.data ? rowToLive(liveRes.data) : { version: 1, pauses: [] };
@@ -427,6 +435,30 @@ async function deleteAgendaNow(id, expectedVersion) {
   if (S.agenda[id]) S.agenda[id] = { ...S.agenda[id], deleted: true };
   await persistCollections();
   await enqueue({ kind: "cond-update", table: "sono_agenda", id, patch, expectedVersion });
+}
+
+/* ---------- writes: humor (aba Vocês) ---------- */
+function journalPatch(rec, now) {
+  return { at: rec.at, mood: rec.mood, note: rec.note || null, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+}
+async function putNewJournal(rec) {
+  const now = Date.now();
+  const row = { id: rec.id, ...journalPatch(rec, now), by_user_id: S.uid, deleted: false, version: 1 };
+  S.journal[rec.id] = rowToJournal(row); await persistCollections(); render();
+  await enqueue({ kind: "insert", table: "sono_journal", row });
+}
+async function putEditedJournal(rec, expectedVersion) {
+  const now = Date.now();
+  const patch = journalPatch(rec, now);
+  S.journal[rec.id] = rowToJournal({ ...patch, id: rec.id, version: expectedVersion + 1 }); await persistCollections(); render();
+  await enqueue({ kind: "cond-update", table: "sono_journal", id: rec.id, patch, expectedVersion });
+}
+async function deleteJournalNow(id, expectedVersion) {
+  const now = Date.now();
+  const patch = { deleted: true, updated_at: now, last_edited_by: S.uid, device_name: S.deviceName || null };
+  if (S.journal[id]) S.journal[id] = { ...S.journal[id], deleted: true };
+  await persistCollections();
+  await enqueue({ kind: "cond-update", table: "sono_journal", id, patch, expectedVersion });
 }
 
 /* ---------- live_state (cronômetro + pausas) ---------- */
@@ -726,7 +758,12 @@ function renderToday() {
   const growthLine = lg ? `<button class="rec" data-shortcut="growth"><span class="dot" style="background:var(--sleep)"></span><span class="t">${fmtTime(lg.measuredAt)}</span><span class="x">Última pesagem${lg.weightG ? ` · ${(lg.weightG / 1000).toFixed(2).replace(".", ",")} kg` : ""}${lg.heightCm ? ` · ${lg.heightCm} cm` : ""}</span></button>` : "";
 
   const upcoming = upcomingAgenda();
-  const agendaHTML = upcoming.length ? `<h2>Próximos compromissos</h2>${upcoming.map(a => `<button class="agenda-item" data-agenda-edit="${esc(a.id)}"><span class="dot" style="background:var(--feed)"></span><span class="t">${fmtTime(a.scheduledAt)}</span><span class="x">${esc(AGENDA_KIND_LABEL[a.kind] || a.kind)}${a.title ? ` · ${esc(a.title)}` : ""}</span></button>`).join("")}` : "";
+  const nextNap = st.schedule.nextNap;
+  const agendaHTML = upcoming.length ? `<h2>Próximos compromissos</h2>${upcoming.map(a => {
+    const conflict = nextNap && a.scheduledAt >= nextNap.from && a.scheduledAt <= nextNap.to;
+    return `<button class="agenda-item" data-agenda-edit="${esc(a.id)}"><span class="dot" style="background:var(--feed)"></span><span class="t">${fmtTime(a.scheduledAt)}</span>
+      <span class="x">${esc(AGENDA_KIND_LABEL[a.kind] || a.kind)}${a.title ? ` · ${esc(a.title)}` : ""}${conflict ? `<br><small style="color:var(--warn)">Pode coincidir com a soneca prevista (~${fmtTime(nextNap.from)}–${fmtTime(nextNap.to)})</small>` : ""}</span></button>`;
+  }).join("")}` : "";
 
   $("#view-hoje").innerHTML = `
     ${forgottenHTML}
@@ -1322,13 +1359,18 @@ function renderGuide() {
     <p>A previsão do próximo sono começa pela faixa de tempo acordado típica da idade. Depois de alguns sonos registrados, ela passa a usar a mediana dos intervalos reais do bebê nos últimos 3 dias, sem sair muito da faixa da idade. É uma estimativa: os sinais do bebê (bocejar, esfregar os olhos, olhar parado, irritação) valem mais que o relógio.</p>
     <p class="src">As faixas de sono total vêm de consensos de especialistas. As janelas de tempo acordado são usadas na prática por pediatras e consultoras de sono, mas têm pouca base em estudos controlados. Por isso o app as trata como ponto de partida ajustável, e não como regra.</p>
 
-    <h2>O que esperar de 0 a 3 meses</h2>
-    <ul>
-      <li>O sono é distribuído ao longo do dia e da noite, em blocos curtos, porque o ritmo circadiano ainda está se formando. Ele costuma se organizar entre 2 e 4 meses.</li>
-      <li>Luz natural e movimento durante o dia; ambiente escuro, calmo e mamadas com pouca estimulação à noite ajudam o relógio biológico a amadurecer.</li>
-      <li>Recém-nascidos mamam em livre demanda, geralmente 8 a 12 vezes em 24 h. Fique de olho nos sinais de fome antes do choro.</li>
-      <li>Variação grande de um dia para outro é normal. Compare tendências da semana, não dias isolados.</li>
-    </ul>
+    <h2>Sono do recém-nascido</h2>
+    <p>Nos primeiros meses o sono é distribuído ao longo do dia e da noite, em blocos curtos: os ciclos são mais curtos que os de um adulto e têm mais sono ativo (equivalente ao REM). O ritmo circadiano — o "relógio biológico" que diferencia dia e noite — ainda está imaturo e costuma se organizar entre 2 e 4 meses. Variação grande de um dia para o outro é normal; compare tendências de vários dias, não um dia isolado.</p>
+    <p class="src">National Sleep Foundation (Hirshkowitz et al., 2015); AASM (Paruthi et al., 2016).</p>
+
+    <h2>Sinais de sono</h2>
+    <p>Bocejar, esfregar os olhos, olhar parado ou desviar o olhar, puxar a orelha e ficar mais quieto ou irritado costumam aparecer antes do choro. Choro é um sinal tardio — agir nos sinais anteriores facilita o bebê pegar no sono.</p>
+
+    <h2>Ambiente</h2>
+    <p>Luz natural e atividade durante o dia, ambiente mais escuro e calmo à noite ajudam o relógio biológico a amadurecer mais rápido. Ruído branco em volume baixo e longe do berço pode ajudar a mascarar sons da casa; temperatura amena, sem cobrir demais o bebê.</p>
+
+    <h2>Rotina na hora de dormir</h2>
+    <p>Uma sequência curta e previsível antes do sono (banho, mamada, ambiente calmo, "boa noite") ajuda a sinalizar que a hora de dormir está chegando. Pode começar desde cedo; costuma ganhar consistência e efeito a partir de 6–8 semanas.</p>
 
     <h2>Sono seguro (AAP, 2022)</h2>
     <ul>
@@ -1338,9 +1380,18 @@ function renderGuide() {
       <li>Evitar deixar o bebê dormir em sofá, poltrona, cadeirinha de carro fora do carro ou superfícies inclinadas.</li>
       <li>Evitar superaquecimento e exposição à fumaça de cigarro. Amamentação e chupeta na hora de dormir estão associadas a menor risco.</li>
     </ul>
+    <p class="src">Moon et al., <em>Pediatrics</em>, 2022 (AAP).</p>
+
+    <h2>Regressões de sono</h2>
+    <p>É comum o sono piorar por alguns dias a poucas semanas em certas fases — perto dos 4 meses (uma mudança real e permanente na forma como o sono se organiza, não só passageira), em saltos de desenvolvimento, marcos motores (virar, sentar, engatinhar) ou dentição. Manter a rotina e as mesmas respostas costuma ajudar o sono a se reorganizar sozinho.</p>
+    <p class="src">Descrição amplamente usada na prática pediátrica e por consultoras de sono; não é um diagnóstico nem tem uma definição clínica única.</p>
+
+    <h2>Amamentação e sinais de fome</h2>
+    <p>Sinais precoces de fome: buscar o peito/mão, levar as mãos à boca, chupar os dedos, virar a cabeça procurando. Nos primeiros meses a amamentação costuma ser em livre demanda, geralmente 8 a 12 vezes em 24 h.</p>
+    <p class="src">AAP / HealthyChildren.org.</p>
 
     <h2>Quando falar com o pediatra</h2>
-    <p>Procure orientação se o bebê estiver muito sonolento e difícil de acordar para mamar, com poucas fraldas molhadas, respirando com pausas ou esforço, com ronco constante, ou se algo simplesmente parecer diferente do normal dele. Este app é um diário, não um dispositivo médico.</p>
+    <p>Procure orientação se o bebê estiver muito sonolento e difícil de acordar para mamar, com poucas fraldas molhadas, respirando com pausas ou esforço, com ronco constante, com o crescimento fugindo do esperado, ou se algo simplesmente parecer diferente do normal dele. Este app é um diário, não um dispositivo médico.</p>
 
     <h2>Referências</h2>
     <div class="scroll"><table>
@@ -1348,7 +1399,8 @@ function renderGuide() {
       <tr><td>Hirshkowitz et al., <em>Sleep Health</em>, 2015 (National Sleep Foundation)</td><td>14–17 h para 0–3 meses</td></tr>
       <tr><td>Paruthi et al., <em>J Clin Sleep Med</em>, 2016 (AASM, endossado pela AAP)</td><td>Faixas a partir de 4 meses</td></tr>
       <tr><td>Moon et al., <em>Pediatrics</em>, 2022 (AAP, sono seguro)</td><td>Recomendações de sono seguro</td></tr>
-      <tr><td>AAP / HealthyChildren.org, orientação sobre amamentação</td><td>8–12 mamadas por dia no início</td></tr>
+      <tr><td>AAP / HealthyChildren.org, orientação sobre amamentação</td><td>8–12 mamadas por dia no início; sinais de fome</td></tr>
+      <tr><td>WHO Child Growth Standards (OMS), parâmetros LMS republicados pelo CDC/NCHS</td><td>Curva de crescimento em Tendências</td></tr>
       <tr><td>Huckleberry, Napper, Glow Baby, BabyTime</td><td>Inspiração de uso: registro com um toque, previsão de soneca, visão de 24 h, compartilhamento</td></tr>
     </table></div>`;
 }
@@ -1582,6 +1634,63 @@ $("#agDelete").addEventListener("click", () => {
   $("#dlgAgenda").close(); editingAgenda = null; toast("Apagado.");
 });
 
+/* ---------- dialog: Vocês (humor, Fase 6) ---------- */
+const journalAsc = () => Object.values(S.journal).filter(j => j && !j.deleted).sort((a, b) => a.at - b.at);
+function renderJournalBalance() {
+  const counts = nightShiftCounts({ sleepEvents: sleeps(), now: Date.now(), days: 7, nightWindow: nightWindow() });
+  const names = Object.keys(counts);
+  const total = names.reduce((s, n) => s + counts[n], 0);
+  const el = $("#jrnBalanceText");
+  if (!el) return;
+  if (total < 3 || names.length < 2) { el.textContent = "Ainda não há noites suficientes registradas nos dois aparelhos para comparar."; return; }
+  names.sort((a, b) => counts[b] - counts[a]);
+  const top = names[0], topShare = counts[top] / total;
+  el.textContent = topShare >= 0.7
+    ? `${top} tem cuidado da madrugada com mais frequência nos últimos 7 dias (${counts[top]} de ${total} noites). Que tal revezar hoje?`
+    : `A madrugada tem ficado bem dividida nos últimos 7 dias (${names.map(n => `${n}: ${counts[n]}`).join(" · ")}).`;
+}
+function renderJournalList() {
+  const list = [...journalAsc()].reverse().slice(0, 30);
+  $("#jrnList").innerHTML = list.length ? list.map(j => `<button type="button" class="rec" data-journal-edit="${esc(j.id)}">
+      <span class="dot" style="background:var(--feed)"></span><span class="t">${esc(dayLabelShort(j.at))} ${fmtTime(j.at)}</span>
+      <span class="x">${MOOD_EMOJI[j.mood] || ""} ${j.mood}/5${j.note ? ` · ${esc(j.note)}` : ""}<small>${j.deviceName ? `por ${esc(j.deviceName)}` : ""}</small></span></button>`).join("")
+    : `<p class="empty">Nenhum registro ainda.</p>`;
+}
+function openJournal(j) {
+  editingJournal = j && j.id ? j : null;
+  const row = j || { at: Date.now(), mood: 3 };
+  $("#jrnTitle").textContent = editingJournal ? "Editar registro" : "Como você está?";
+  $("#jrnWhen").value = toInput(row.at);
+  $("#jrnNote").value = row.note || "";
+  $("#jrnMoodPicker").dataset.value = row.mood;
+  $("#jrnMoodPicker").querySelectorAll("[data-mood]").forEach(b => b.classList.toggle("on", Number(b.dataset.mood) === row.mood));
+  $("#jrnDelete").hidden = !editingJournal;
+  renderJournalBalance();
+  renderJournalList();
+  if (!$("#dlgJournal").open) $("#dlgJournal").showModal();
+}
+$("#btnOpenJournal").addEventListener("click", () => { $("#dlgSettings").close(); openJournal(null); });
+$("#jrnMoodPicker").addEventListener("click", e => {
+  const b = e.target.closest("[data-mood]"); if (!b) return;
+  $("#jrnMoodPicker").dataset.value = b.dataset.mood;
+  $("#jrnMoodPicker").querySelectorAll("[data-mood]").forEach(x => x.classList.toggle("on", x === b));
+});
+$("#formJournal").addEventListener("submit", ev => {
+  const when = fromInput($("#jrnWhen").value);
+  const mood = Number($("#jrnMoodPicker").dataset.value || 3);
+  if (!when || isNaN(when)) { ev.preventDefault(); toast("Informe a data e hora."); return; }
+  const rec = { id: editingJournal ? editingJournal.id : uidGen(), at: when, mood, note: $("#jrnNote").value.trim() || null };
+  if (editingJournal) putEditedJournal(rec, editingJournal.version || 1);
+  else putNewJournal(rec);
+  toast(editingJournal ? "Atualizado." : "Registrado.");
+  editingJournal = null;
+});
+$("#jrnDelete").addEventListener("click", () => {
+  if (!editingJournal) return;
+  deleteJournalNow(editingJournal.id, editingJournal.version || 1);
+  $("#dlgJournal").close(); editingJournal = null; toast("Apagado.");
+});
+
 function openAdjust(which) {
   adjusting = which;
   $("#adjTitle").textContent = which === "sleep" ? "Quando adormeceu?" : "Quando começou a mamar?";
@@ -1682,6 +1791,9 @@ document.addEventListener("click", e => {
   if (grwEdit) { const g = S.growth[grwEdit.dataset.growthEdit]; if (g) openGrowth(g); return; }
   if (e.target.closest("[data-growth-new]")) return openGrowth(null);
 
+  const jrnEdit = e.target.closest("[data-journal-edit]");
+  if (jrnEdit) { const j = S.journal[jrnEdit.dataset.journalEdit]; if (j) openJournal(j); return; }
+
   const period = e.target.closest("[data-trend-period]");
   if (period) { S.trendsDays = Number(period.dataset.trendPeriod); renderTrends(); return; }
 
@@ -1719,6 +1831,7 @@ function subscribeRealtime() {
     .on("postgres_changes", { event: "*", schema: "public", table: "live_state" }, () => sync())
     .on("postgres_changes", { event: "*", schema: "public", table: "sono_growth" }, () => sync())
     .on("postgres_changes", { event: "*", schema: "public", table: "sono_agenda" }, () => sync())
+    .on("postgres_changes", { event: "*", schema: "public", table: "sono_journal" }, () => sync())
     .subscribe(status => {
       realtimeStatus = status;
       if (status === "SUBSCRIBED") {

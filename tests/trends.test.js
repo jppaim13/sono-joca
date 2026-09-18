@@ -4,6 +4,7 @@ import { DAY, HOUR, MIN, midnight } from "../docs/js/time.js";
 import {
   dayBuckets, buildTrend, computeInsights,
   ageMonthsExact, lmsAt, zScoreForValue, valueForZ, percentileFromZ, growthPoint, percentileCurve,
+  nightShiftCounts,
 } from "../docs/js/trends.js";
 import whoData from "../docs/data/who-growth-lms.json" with { type: "json" };
 
@@ -143,4 +144,18 @@ test("dados da OMS: 25 linhas (0-24 meses) para peso, altura e perímetro cefál
       assert.equal(whoData[measure][sex][24][0], 24);
     }
   }
+});
+
+test("nightShiftCounts conta sonos noturnos por aparelho dentro do período, ignorando sonecas e dias fora da janela", () => {
+  const now = Date.parse("2026-03-10T12:00:00");
+  const t0 = midnight(now);
+  const sleepEvents = [
+    { start: t0 + 20 * HOUR, end: t0 + DAY + 6 * HOUR, deviceName: "iPhone do Papai", data: {} }, // noite 09→10
+    { start: t0 - DAY + 20 * HOUR, end: t0 + 6 * HOUR, deviceName: "iPhone da Mamãe", data: {} }, // noite 08→09
+    { start: t0 + 13 * HOUR, end: t0 + 14 * HOUR, deviceName: "iPhone do Papai", data: {} }, // soneca, não conta
+    { start: t0 - 10 * DAY, end: t0 - 10 * DAY + 8 * HOUR, deviceName: "iPhone do Papai", data: { pauses: [] } }, // fora do período
+  ];
+  const counts = nightShiftCounts({ sleepEvents, now, days: 3, nightWindow: NIGHT });
+  assert.equal(counts["iPhone do Papai"], 1);
+  assert.equal(counts["iPhone da Mamãe"], 1);
 });

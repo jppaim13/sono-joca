@@ -75,16 +75,24 @@ Feito:
 - **Fase 4 (tendências e relatórios)** implementada — ver
   [Fase 4 — tendências e relatórios](#fase-4--tendências-e-relatórios) abaixo. Sem migração nova (usa
   as colunas que a Fase 1 já criou, incluindo `sono_growth`).
+- **Fase 5 (sons para dormir) pulada por decisão sua** — ver nota em
+  [Fase 6 — agenda, conteúdo e "Vocês"](#fase-6--agenda-conteúdo-e-vocês) abaixo.
+- **Fase 6 (agenda, conteúdo e "Vocês")** implementada — ver
+  [Fase 6 — agenda, conteúdo e "Vocês"](#fase-6--agenda-conteúdo-e-vocês) abaixo. Sem migração nova
+  (usa `sono_agenda`/`sono_journal`, já criadas na `003_fases_1_a_6.sql`). **Com essa fase, o roteiro
+  original de Fases 1–6 está concluído** (exceto a 5, pulada de propósito).
 
 Pendente:
 - Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo
   definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
 - Ativar notificações de verdade num iPhone (só dá pra testar com o app instalado, iOS 16.4+).
-- Validar a Fase 4 num iPhone real (gráficos, relatório em PDF e exportação XLSX/CSV pela folha de
-  compartilhamento do iOS) — só testei em Node (lógica pura) e sintaticamente; não há como abrir o
-  Safari real neste ambiente.
-- Fases 5–6 (sons para dormir, agenda/conteúdo/aba "Vocês") — ainda não iniciadas.
+- Validar as Fases 4 e 6 num iPhone real (gráficos, relatório em PDF, exportação XLSX/CSV, curva de
+  crescimento, humor em "Vocês", aviso de conflito na agenda) — só testei em Node (lógica pura) e
+  sintaticamente; não há como abrir o Safari real neste ambiente.
+- Fase 5 (sons para dormir) — pulada por decisão sua, fica documentada como não implementada de
+  propósito, não como pendência esquecida. Dá pra retomar depois se fizer falta (é praticamente só
+  conteúdo/Guia, sem schema novo).
 
 **Detalhe importante para quem for mexer no banco:** o projeto Supabase usado
 (`lozveygdolwouekvxwkz`, região sa-east-1) é **compartilhado** com outro app do dono do repositório
@@ -515,8 +523,8 @@ todos em SVG próprio (sem biblioteca de gráficos), com seletor de período **7
 
 **Sem CDN em runtime:** `jsPDF` (`docs/vendor/jspdf.umd.min.js`) e `SheetJS`/`xlsx`
 (`docs/vendor/xlsx.full.min.js`) foram baixados uma vez e ficam versionados no repositório, cacheados
-pelo service worker (`sono-shell-v10`) para funcionar offline. Só são carregados (`<script>` injetado)
-na primeira vez que o relatório ou a exportação é usada, para não pesar a abertura normal do app.
+pelo service worker para funcionar offline. Só são carregados (`<script>` injetado) na primeira vez que
+o relatório ou a exportação é usada, para não pesar a abertura normal do app.
 
 **Simplificações assumidas:**
 - "Semana" virou "Tendências" no mesmo lugar da barra, em vez de uma quinta aba nova — pareceu melhor
@@ -557,3 +565,62 @@ na primeira vez que o relatório ou a exportação é usada, para não pesar a a
 5. Tocar em "Exportar CSV" → mesma folha, com um `.csv` legível (acentos corretos) no Numbers/Excel.
 6. Testar offline (modo avião, app já aberto uma vez para cachear): abrir Tendências, tocar nos três
    botões de exportação → devem continuar funcionando (bibliotecas já estão no cache do service worker).
+
+## Fase 6 — agenda, conteúdo e "Vocês"
+
+**Nota sobre a Fase 5:** pulada por decisão sua ("vamos pular a fase 5 e ir direto pra fase 6"). Não foi
+implementada — fica registrada aqui como pulada de propósito, não esquecida. Era o card explicando os
+Sons de Fundo nativos do iOS (sem player próprio, porque o iOS pausa áudio web com a tela bloqueada); dá
+pra retomar depois, é conteúdo/Guia puro, sem schema novo.
+
+**O que entrou:**
+- **Agenda com aviso de conflito** — "Próximos compromissos" na tela Hoje agora compara o horário de
+  cada compromisso com a janela de soneca prevista (`st.schedule.nextNap`); se coincidir, mostra "Pode
+  coincidir com a soneca prevista (~HH:MM–HH:MM)" embaixo do compromisso. Só um aviso, não bloqueia nada
+  — dá pra marcar a consulta/passeio mesmo assim.
+- **Guia reorganizado em capítulos curtos**, cada um com fonte citada: sono do recém-nascido, sinais de
+  sono, ambiente, rotina na hora de dormir, sono seguro (AAP 2022, já existia), regressões de sono,
+  amamentação e sinais de fome, e quando falar com o pediatra (expandido). A tabela de Referências ganhou
+  a linha da OMS (curva de crescimento, já citada na Fase 4).
+- **"Vocês"** — Configurações → botão "Vocês": humor de 1 a 5 (emoji + nota opcional), registrado com o
+  nome do aparelho de quem preencheu. Como a conta é compartilhada, os dois veem os registros um do
+  outro (texto explicando isso no topo do diálogo). Lista dos últimos registros com toque para editar.
+  Mostra também um lembrete gentil e não acusatório: compara, nos últimos 7 dias, quantos sonos noturnos
+  cada aparelho registrou (`docs/js/trends.js`, `nightShiftCounts`) e, se um dos dois passou de 70% do
+  total, sugere revezar — sem nomes feios, sem métricas expostas como "desempenho".
+  Guardado em `sono_journal` (já existia desde a `003_fases_1_a_6.sql`, sem uso até agora), pelo mesmo
+  outbox/conflito de todo o resto.
+
+**Simplificações assumidas:**
+- "Vocês" é um botão em Configurações (mesmo padrão de "Notificações" e "Atalhos rápidos"), não uma
+  quinta aba nova — o pedido original marcava essa aba como opcional, e manter 4 abas preserva a
+  navegação em uma mão já estabelecida desde a Fase 4.
+- O aviso de conflito da agenda olha só a **próxima** soneca prevista (`nextNap`), não janelas mais
+  distantes no dia — é o dado que o motor de previsão já expõe hoje; comparar contra o dia inteiro
+  precisaria simular o plano completo bebê a bebê, fora de escopo aqui.
+- O "lembrete gentil" de revezar é só descritivo (conta noites por aparelho nos últimos 7 dias) — não
+  tenta entender de quem foi a "culpa" de uma noite ruim, nem soma tempo acordado, só quem iniciou o
+  sono noturno.
+- Regressões de sono no Guia são descritas como prática comum, não como diagnóstico com base forte em
+  evidência — mesmo cuidado editorial já usado para janelas de vigília.
+
+## Checklist local (Fase 6, Chrome/`localhost`)
+
+1. Criar um compromisso na Agenda para um horário dentro da janela de soneca prevista (ver "Próximo
+   sono provável" na tela Hoje) → deve aparecer o aviso de conflito embaixo do compromisso.
+2. Abrir a aba Guia → conferir os novos capítulos (sinais de sono, ambiente, rotina, regressões,
+   amamentação) e a tabela de Referências atualizada.
+3. Configurações → "Vocês" → escolher um humor, escrever uma nota, salvar → deve aparecer na lista de
+   registros recentes, com o nome do aparelho.
+4. Tocar num registro da lista → deve abrir para editar (não deve reabrir em branco nem duplicar).
+5. Registrar sonos noturnos simulando os dois aparelhos (trocar o nome em Configurações entre um
+   registro e outro) → reabrir "Vocês" → o texto de "Cuidado da madrugada" deve refletir a proporção.
+
+## Roteiro de testes manuais (Fase 6, no iPhone real)
+
+1. Com os dois iPhones, um deles cria um compromisso dentro da janela de soneca prevista do outro →
+   o aviso de conflito deve aparecer nos dois aparelhos (sincronizado por Realtime).
+2. Cada pessoa abre Configurações → "Vocês" no seu próprio aparelho, registra o humor do dia → o outro
+   aparelho deve ver o registro do primeiro (conta compartilhada).
+3. Ler o Guia inteiro na tela do iPhone → conferir que nenhum capítulo estoura a largura da tela nem
+   fica cortado, e que os links/fontes citadas estão legíveis.

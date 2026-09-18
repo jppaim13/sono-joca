@@ -168,6 +168,8 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
 .login .error{color:var(--warn);min-height:1.5em;margin-top:10px}
 .login .sent{color:var(--ok);margin-top:14px}
 #diagBody{white-space:pre-wrap;font-size:.82rem;max-height:50vh;overflow:auto;background:var(--bg);border-radius:10px;padding:10px}
+#jrnList{max-height:30vh;overflow:auto}
+.chip[data-mood]{font-size:1rem;padding:8px 10px}
 [hidden]{display:none!important}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
@@ -368,6 +370,9 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
     <button type="button" class="btn ghost" id="btnOpenNotifications">Notificações</button>
     <button type="button" class="btn ghost" id="btnOpenQuickActions">Atalhos rápidos (Siri, Watch…)</button>
   </div>
+  <div class="actions">
+    <button type="button" class="btn ghost" id="btnOpenJournal">Vocês</button>
+  </div>
   <div class="actions"><button type="button" class="btn danger" id="btnLogout">Sair desta conta</button><span class="spacer"></span><button type="button" class="btn ghost" data-close>Cancelar</button><button type="submit" class="btn primary">Salvar</button></div>
 </form></dialog>
 
@@ -436,6 +441,32 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
     <div class="actions"><button type="button" class="btn primary" data-close>Fechar</button></div>
   </div>
 </dialog>
+
+<dialog id="dlgJournal"><form method="dialog" id="formJournal">
+  <h2 id="jrnTitle">Como você está?</h2>
+  <p style="color:var(--muted);font-size:.85rem;margin:0">A conta é única nos dois aparelhos — os
+  registros aparecem para os dois, com o nome de quem registrou.</p>
+  <label for="jrnWhen">Quando</label><input type="datetime-local" id="jrnWhen" required>
+  <label>Humor</label>
+  <div class="chips" id="jrnMoodPicker">
+    <button type="button" class="chip" data-mood="1">😞 1</button>
+    <button type="button" class="chip" data-mood="2">😕 2</button>
+    <button type="button" class="chip" data-mood="3">😐 3</button>
+    <button type="button" class="chip" data-mood="4">🙂 4</button>
+    <button type="button" class="chip" data-mood="5">😄 5</button>
+  </div>
+  <label for="jrnNote">Nota (opcional)</label><input id="jrnNote" maxlength="200" placeholder="Como foi o dia ou a noite">
+  <div class="actions">
+    <button type="button" class="btn danger" id="jrnDelete" hidden>Apagar</button>
+    <span class="spacer"></span>
+    <button type="button" class="btn ghost" data-close>Cancelar</button>
+    <button type="submit" class="btn primary">Salvar</button>
+  </div>
+  <h2 style="font-size:1.05rem">Cuidado da madrugada</h2>
+  <p id="jrnBalanceText" style="color:var(--muted);font-size:.9rem"></p>
+  <h2 style="font-size:1.05rem">Registros recentes</h2>
+  <div id="jrnList"></div>
+</form></dialog>
 
 <dialog id="dlgTrash">
   <div class="dbody">

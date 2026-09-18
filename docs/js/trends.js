@@ -167,3 +167,20 @@ export function percentileCurve(table, zTarget, stepMonths = 1) {
   for (let m = 0; m <= 24; m += stepMonths) pts.push({ ageMonths: m, value: valueForZ(lmsAt(table, m), zTarget) });
   return pts;
 }
+
+/* ---------- Fase 6: quem tem cuidado mais da madrugada ----------
+   Conta, por `deviceName`, quantos sonos noturnos começaram nos últimos `days` dias — usado para
+   um lembrete gentil de revezar, não uma cobrança (por isso só conta, não julga). */
+export function nightShiftCounts({ sleepEvents, now, days, nightWindow }) {
+  const cutoff = midnight(now) - (days - 1) * DAY;
+  const [nightStart, nightEnd] = nightWindow;
+  const counts = {};
+  for (const e of sleepEvents || []) {
+    if (e.start < cutoff) continue;
+    const isNight = classifySleep(e.start, e.end ?? now, e.isNight, nightStart, nightEnd) === "night";
+    if (!isNight) continue;
+    const name = e.deviceName || "Não identificado";
+    counts[name] = (counts[name] || 0) + 1;
+  }
+  return counts;
+}

@@ -16,12 +16,16 @@ docs/               app do celular — é o que o GitHub Pages publica
   index.html         casca HTML/CSS, carrega js/app.js como módulo
   js/                lógica: app.js (render + Supabase) e módulos puros/testáveis
                       (time.js, validation.js, outbox.js, conflict.js, undo.js, store.js,
-                      timeinput.js, sleep.js, schedule.js — motor de previsão)
-  sw.js               service worker (cache do app shell + aviso de nova versão)
+                      timeinput.js, sleep.js, schedule.js — motor de previsão,
+                      notifications.js — decide o que avisar)
+  sw.js               service worker (cache do app shell + aviso de nova versão + push)
 supabase/
   schema.sql          foto atual completa do schema (tabelas + RLS + índices)
   migrations/         mudanças incrementais, uma por arquivo, idempotentes
   seed_profiles.sql   fallback do nome de conta (conta única — ver Autenticação)
+  functions/          Edge Functions (Deno): sono-scheduler (lembretes), sono-quick-action
+                      (Atalhos/Siri) — importam docs/js/schedule.js e notifications.js direto,
+                      sem duplicar a lógica
 tests/               testes automatizados (Node, node:test) dos módulos puros de docs/js/
 ```
 
@@ -56,13 +60,19 @@ Feito:
 - **Fase 2 (motor de previsão)** implementada — ver
   [Fase 2 — motor de previsão](#fase-2--motor-de-previsão) abaixo. Sem migração nova (usa as colunas
   que a Fase 1 já criou).
+- **Fase 3 (push e atalhos rápidos)** implementada — ver
+  [Fase 3 — lembretes e acesso rápido](#fase-3--lembretes-e-acesso-rápido) abaixo.
+- **Migrações `005_notificacoes.sql` e `006_cron_scheduler.sql` aplicadas e verificadas** —
+  `diaper_after_hours`, gatilho de "dormindo desde" instantâneo e o `pg_cron` a cada 5 min.
+- **`pg_net`/`pg_cron` habilitados**, chaves VAPID geradas e configuradas como secrets, as duas Edge
+  Functions (`sono-scheduler`, `sono-quick-action`) implantadas e testadas (chamada real, sem erro).
 
 Pendente:
 - Testar o fluxo completo em produção nos dois celulares (roteiros na seção Testes abaixo), incluindo
   definir o nome de cada aparelho na primeira abertura.
 - Adicionar o app à tela inicial dos dois celulares (PWA).
-- Fases 3–6 (push/atalhos, tendências, sons, agenda/conteúdo) — ainda não iniciadas.
-- Fases 2–6 (previsão, push/atalhos, tendências, sons, agenda/conteúdo) — ainda não iniciadas.
+- Ativar notificações de verdade num iPhone (só dá pra testar com o app instalado, iOS 16.4+).
+- Fases 4–6 (tendências, sons, agenda/conteúdo) — ainda não iniciadas.
 
 **Detalhe importante para quem for mexer no banco:** o projeto Supabase usado
 (`lozveygdolwouekvxwkz`, região sa-east-1) é **compartilhado** com outro app do dono do repositório
@@ -378,3 +388,83 @@ funções puras isoladas e cenários completos do `computeSchedule`.
    que o normal logo em seguida.
 3. Se/quando o Joaquim passar das 8 semanas: conferir que o modo muda de "recém-nascido" para o modo
    com janelas normais (a mensagem de modo recém-nascido deve sumir).
+
+## Fase 3 — lembretes e acesso rápido
+
+**Infraestrutura já no ar** (feito direto pelo terminal, com sua aprovação — nada disso precisou do
+painel do Supabase):
+- `pg_net` e `pg_cron` habilitados no projeto.
+- Chaves VAPID geradas e salvas como secrets da Edge Function (`VAPID_PUBLIC_KEY`,
+  `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`) — a privada nunca fica em nenhum arquivo do repositório; a
+  pública é segura no código do app (`docs/js/app.js`), é assim que Web Push funciona.
+- **`sono-scheduler`** (Edge Function): roda a cada 5 min via `pg_cron`+`pg_net`, e também na hora
+  quando um sono começa (gatilho em `live_state`, migração `005`). Usa `docs/js/schedule.js` (mesmo
+  motor da Fase 2) e `docs/js/notifications.js` (puro, testado) para decidir o que avisar, manda por
+  Web Push e registra em `sono_notification_log` pra nunca duplicar o mesmo aviso.
+- **`sono-quick-action`** (Edge Function): recebe comandos do app Atalhos com um token por aparelho —
+  `sleep_start`, `sleep_stop`, `feed_start` (com lado), `feed_stop`, `diaper` (com tipo), `bottle`
+  (com ml) e `status` (resposta em texto curto, para a Siri falar). Só compara hash do token, nunca
+  guarda o token em texto puro.
+- As duas funções foram **implantadas e testadas com uma chamada real** (`sono-scheduler` respondeu
+  `{"ok":true}`, `sono-quick-action` rejeitou corretamente um token inválido com 401).
+
+**Decisão de segurança:** as duas funções foram implantadas com `--no-verify-jwt` (não exigem sessão
+de usuário do Supabase) porque são chamadas de fora de um contexto logado — o `pg_cron`/gatilho chama
+`sono-scheduler` de dentro do próprio Postgres, e o Atalhos chama `sono-quick-action` só com o token
+pessoal. Isso significa que, tecnicamente, qualquer um que descobrisse as URLs poderia chamá-las: no
+`sono-scheduler` o pior caso é reprocessar os lembretes sem duplicar nada (o dedupe em
+`sono_notification_log` protege); no `sono-quick-action` toda ação exige um token válido (hash
+verificado) — sem o token, só recebe "token inválido" (401), nada acontece.
+
+**O que a interface ganhou:**
+- Configurações → "Notificações": botão para ativar neste aparelho (pede permissão só depois do
+  toque, como pedido), e as preferências (soneca, mamada, fralda, remédio, agenda, "dormindo desde"),
+  cada aparelho com as suas.
+- Configurações → "Atalhos rápidos": gera um token pessoal (mostrado uma vez só, com botão de copiar),
+  lista e revoga tokens ativos, e explica como montar o atalho no app Atalhos (URL + comandos), pra
+  usar como widget, no Apple Watch, com a Siri, Toque nas Costas, botão de Ação ou na Central de
+  Controle (iOS 18).
+- Notificação sem botão de ação (iOS não suporta) — tocar nela abre o app.
+
+**Simplificações assumidas:**
+- Os lembretes periódicos (soneca, mamada, fralda, remédio, agenda) têm até ~5 min de atraso possível
+  (intervalo do `pg_cron`); só "dormindo desde" é instantâneo (gatilho direto).
+- Sem tela dedicada de "registro de entrega" no app — o histórico fica em `sono_notification_log`,
+  consultável só por SQL por enquanto (dá pra adicionar uma view no Diagnóstico depois, se fizer falta).
+- "Se o push falhar, mostrar o aviso ao abrir o app" (item do plano original) não foi implementado —
+  o app não compara o que deveria ter sido avisado com o que realmente chegou. Ficou para depois.
+- Não testei notificação de verdade chegando num iPhone (preciso do aparelho real, iOS 16.4+, app
+  instalado) — as duas funções foram validadas por chamada direta (`curl`), não pelo fluxo completo.
+
+## Checklist local (Fase 3, Chrome/`localhost`)
+
+Push exige HTTPS ou `localhost` (funciona em ambos) e o app instalável — no Chrome desktop dá pra
+testar a assinatura e as preferências, mas não o recebimento real da notificação (isso só no iPhone).
+
+1. Configurações → "Notificações" → "Ativar notificações neste aparelho" → aceitar a permissão do
+   navegador → devem aparecer os campos de preferência.
+2. Marcar/desmarcar preferências e salvar → reabrir o diálogo → devem continuar como foram salvas.
+3. Configurações → "Atalhos rápidos" → "Gerar novo token" → aparece o token uma vez, com botão de
+   copiar → aparece na lista de "Tokens ativos".
+4. Testar uma chamada real com `curl` (troque `SEU_TOKEN` pelo token gerado e a URL pela do seu
+   projeto):
+   ```bash
+   curl -X POST "https://SEU-PROJETO.supabase.co/functions/v1/sono-quick-action" \
+     -H "Content-Type: application/json" \
+     -d '{"token":"SEU_TOKEN","command":"status"}'
+   ```
+   Deve responder com um texto tipo "Acordado há Xh" ou "Dormindo há X min".
+5. "Revogar" o token na lista → repetir o `curl` acima → deve voltar "token inválido ou revogado".
+
+## Roteiro de testes manuais (Fase 3, no iPhone real)
+
+1. Com o app instalado (não no Safari), ativar notificações em Configurações → deve pedir permissão
+   do iOS.
+2. Registrar um sono → o outro iPhone deve receber "Dormindo" quase na hora (gatilho instantâneo).
+3. Esperar a soneca prevista chegar perto (dentro dos minutos de antecedência configurados) → deve
+   chegar "Soneca chegando".
+4. Deixar passar o intervalo configurado sem mamada → deve chegar o lembrete de mamada.
+5. Criar um atalho no app Atalhos com a URL e o token (comando `status`) → testar com a Siri
+   ("Ei Siri, [nome do atalho]") → ela deve falar a resposta.
+6. Testar um atalho de escrita (ex. `diaper`) → o registro deve aparecer no app, sincronizado com
+   `device_name` do token usado.

@@ -7,7 +7,10 @@ import { netSleepDuration, classifySleep, findSleepOverlap } from "./sleep.js";
 import { ageWakeWindowRef, dailySleepRefHours, computeSchedule } from "./schedule.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.17-fase2";
+const APP_VERSION = "2026.09.17-fase3";
+// Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
+// a privada fica só nos secrets da Edge Function, nunca aqui).
+const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";
 const KIND = { "peito-e": "Peito esquerdo", "peito-d": "Peito direito", "mamadeira": "Mamadeira", "solido": "Comida" };
 const DIAPER_LABEL = { "xixi": "Xixi", "coco": "Cocô", "ambos": "Xixi e cocô" };
 const PLACE_LABEL = { berco: "berço", colo: "colo", carrinho: "carrinho", carro: "carro", sling: "sling" };
@@ -873,6 +876,121 @@ async function openDiagnostics() {
   $("#dlgDiag").showModal();
 }
 
+/* ---------- notificações (Fase 3) ---------- */
+function urlBase64ToUint8Array(base64) {
+  const padding = "=".repeat((4 - (base64.length % 4)) % 4);
+  const b64 = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(b64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+const DEFAULT_NOTIF_PREFS = { nap_enabled: true, nap_lead_min: 30, feed_enabled: true, feed_after_hours: 3,
+  diaper_enabled: false, diaper_after_hours: 3, medicine_enabled: true, agenda_enabled: true, sleep_start_notify_enabled: true };
+
+async function openNotificationsDialog() {
+  $("#dlgSettings").close();
+  const supported = "Notification" in window && "PushManager" in window && swReg;
+  const permission = supported ? Notification.permission : "unsupported";
+  let subscribed = false;
+  if (supported && permission === "granted") {
+    try { subscribed = !!(await swReg.pushManager.getSubscription()); } catch {}
+  }
+  $("#notifPermissionBlock").hidden = subscribed;
+  $("#notifPrefsBlock").hidden = !subscribed;
+  $("#btnSaveNotifPrefs").hidden = !subscribed;
+  $("#notifStatus").textContent = !supported ? "Este navegador não suporta notificações."
+    : permission === "denied" ? "Notificações bloqueadas para este site — libere em Ajustes do iPhone."
+    : subscribed ? "Ativadas neste aparelho." : "";
+  if (subscribed) {
+    const { data } = await sb.from("sono_notification_prefs").select("*").eq("device_name", S.deviceName).maybeSingle();
+    const p = { ...DEFAULT_NOTIF_PREFS, ...(data || {}) };
+    $("#prefNap").checked = p.nap_enabled; $("#prefNapLead").value = p.nap_lead_min;
+    $("#prefFeed").checked = p.feed_enabled; $("#prefFeedHours").value = p.feed_after_hours;
+    $("#prefDiaper").checked = p.diaper_enabled; $("#prefDiaperHours").value = p.diaper_after_hours;
+    $("#prefMedicine").checked = p.medicine_enabled;
+    $("#prefAgenda").checked = p.agenda_enabled;
+    $("#prefSleepStart").checked = p.sleep_start_notify_enabled;
+  }
+  $("#dlgNotifications").showModal();
+}
+async function enableNotifications() {
+  if (!("Notification" in window) || !("PushManager" in window) || !swReg) {
+    toast("Este navegador não suporta notificações."); return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { toast("Permissão não concedida."); return; }
+  try {
+    let sub = await swReg.pushManager.getSubscription();
+    if (!sub) sub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+    const json = sub.toJSON();
+    await sb.from("sono_push_subscriptions").upsert({
+      device_name: S.deviceName, endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth,
+      by_user_id: S.uid, created_at: Date.now(),
+    }, { onConflict: "endpoint" });
+    await sb.from("sono_notification_prefs").upsert({ device_name: S.deviceName, ...DEFAULT_NOTIF_PREFS, updated_at: Date.now() }, { onConflict: "device_name" });
+    toast("Notificações ativadas.");
+    openNotificationsDialog();
+  } catch (e) { toast("Não foi possível ativar agora."); }
+}
+$("#btnEnableNotifications").addEventListener("click", enableNotifications);
+$("#formNotifications").addEventListener("submit", async ev => {
+  if ($("#notifPrefsBlock").hidden) return;
+  const prefs = {
+    device_name: S.deviceName,
+    nap_enabled: $("#prefNap").checked, nap_lead_min: Number($("#prefNapLead").value) || 30,
+    feed_enabled: $("#prefFeed").checked, feed_after_hours: Number($("#prefFeedHours").value) || 3,
+    diaper_enabled: $("#prefDiaper").checked, diaper_after_hours: Number($("#prefDiaperHours").value) || 3,
+    medicine_enabled: $("#prefMedicine").checked, agenda_enabled: $("#prefAgenda").checked,
+    sleep_start_notify_enabled: $("#prefSleepStart").checked, updated_at: Date.now(),
+  };
+  const { error } = await sb.from("sono_notification_prefs").upsert(prefs, { onConflict: "device_name" });
+  toast(error ? "Não foi possível salvar agora." : "Preferências salvas.");
+});
+
+/* ---------- atalhos rápidos (Siri, Watch, Atalhos) ---------- */
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function randomToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function renderQuickTokenList() {
+  const { data } = await sb.from("sono_quick_tokens").select("*").is("revoked_at", null).order("created_at", { ascending: false });
+  const rows = data || [];
+  $("#quickTokenList").innerHTML = rows.length ? rows.map(t => `
+    <div class="shortcut-row"><span>${esc(t.device_name)} · ${new Date(t.created_at).toLocaleDateString("pt-BR")}</span>
+      <button type="button" class="btn ghost" data-revoke-token="${t.id}" style="width:auto;padding:6px 10px">Revogar</button></div>`).join("")
+    : `<p class="empty">Nenhum token ativo.</p>`;
+}
+async function openQuickActionsDialog() {
+  $("#dlgSettings").close();
+  $("#quickTokenNew").hidden = true;
+  const cfg = loadSbConfig();
+  $("#quickActionUrl").textContent = cfg ? `${cfg.url}/functions/v1/sono-quick-action` : "";
+  await renderQuickTokenList();
+  $("#dlgQuickActions").showModal();
+}
+async function generateQuickToken() {
+  const token = randomToken();
+  const hash = await sha256Hex(token);
+  const { error } = await sb.from("sono_quick_tokens").insert({ device_name: S.deviceName, token_hash: hash, by_user_id: S.uid, created_at: Date.now() });
+  if (error) { toast("Não foi possível gerar o token agora."); return; }
+  $("#quickTokenValue").value = token;
+  $("#quickTokenNew").hidden = false;
+  renderQuickTokenList();
+}
+$("#btnNewQuickToken").addEventListener("click", generateQuickToken);
+$("#btnCopyQuickToken").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#quickTokenValue").value); toast("Token copiado."); }
+  catch { $("#quickTokenValue").select(); toast("Selecione e copie manualmente."); }
+});
+async function revokeQuickToken(id) {
+  if (!confirm("Revogar este token? Qualquer atalho que usa ele para de funcionar.")) return;
+  await sb.from("sono_quick_tokens").update({ revoked_at: Date.now() }).eq("id", id);
+  renderQuickTokenList();
+}
+
 /* ---------- render: guide ---------- */
 function renderGuide() {
   const w = ageWeeks(), ref = sleepRef(w), [lo, hi] = wakeRef(w);
@@ -1188,6 +1306,8 @@ try { applyTheme(localStorage.getItem("sono-theme") || "auto"); } catch {}
 document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => { b.closest("dialog").close(); editing = null; }));
 $("#btnExportBackup").addEventListener("click", exportBackup);
 $("#btnDiagnostics").addEventListener("click", () => { $("#dlgSettings").close(); openDiagnostics(); });
+$("#btnOpenNotifications").addEventListener("click", openNotificationsDialog);
+$("#btnOpenQuickActions").addEventListener("click", openQuickActionsDialog);
 $("#btnCopyDiag").addEventListener("click", async () => {
   const text = $("#diagBody").textContent;
   try { await navigator.clipboard.writeText(text); toast("Relatório copiado."); }
@@ -1233,6 +1353,9 @@ document.addEventListener("click", e => {
 
   const atyp = e.target.closest("[data-atypical]");
   if (atyp) return toggleAtypicalDay(atyp.dataset.atypical);
+
+  const revoke = e.target.closest("[data-revoke-token]");
+  if (revoke) return revokeQuickToken(Number(revoke.dataset.revokeToken));
 
   const t = e.target.closest("button"); if (!t) return;
   if (t.id === "btnSleep") return toggleSleep();

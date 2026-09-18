@@ -355,6 +355,10 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
     <button type="button" class="btn ghost" id="btnDiagnostics">Diagnóstico</button>
     <button type="button" class="btn ghost" id="btnChangePassword">Trocar senha</button>
   </div>
+  <div class="actions">
+    <button type="button" class="btn ghost" id="btnOpenNotifications">Notificações</button>
+    <button type="button" class="btn ghost" id="btnOpenQuickActions">Atalhos rápidos (Siri, Watch…)</button>
+  </div>
   <div class="actions"><button type="button" class="btn danger" id="btnLogout">Sair desta conta</button><span class="spacer"></span><button type="button" class="btn ghost" data-close>Cancelar</button><button type="submit" class="btn primary">Salvar</button></div>
 </form></dialog>
 
@@ -366,6 +370,63 @@ input,select,textarea{width:100%;padding:11px 12px;border:1px solid var(--line);
   <p class="error" id="changePasswordError" role="alert"></p>
   <div class="actions"><button type="button" class="btn ghost" data-close>Cancelar</button><button type="submit" class="btn primary">Salvar</button></div>
 </form></dialog>
+
+<dialog id="dlgNotifications"><form method="dialog" id="formNotifications">
+  <h2>Notificações</h2>
+  <p style="color:var(--muted);font-size:.9rem;margin:0">Só funciona com o app instalado (iOS 16.4+). Ativa
+  neste aparelho — cada iPhone escolhe as suas.</p>
+  <div id="notifPermissionBlock" class="actions" style="justify-content:flex-start">
+    <button type="button" class="btn primary" id="btnEnableNotifications">Ativar notificações neste aparelho</button>
+  </div>
+  <p id="notifStatus" style="color:var(--muted);font-size:.85rem"></p>
+  <div id="notifPrefsBlock" hidden>
+    <label><input type="checkbox" id="prefNap"> Soneca chegando</label>
+    <label for="prefNapLead">Avisar com quantos minutos de antecedência</label>
+    <input type="number" id="prefNapLead" min="5" max="90" inputmode="numeric">
+    <label><input type="checkbox" id="prefFeed"> Tempo desde a última mamada</label>
+    <label for="prefFeedHours">Avisar depois de quantas horas</label>
+    <input type="number" id="prefFeedHours" min="1" max="12" step="0.5" inputmode="decimal">
+    <label><input type="checkbox" id="prefDiaper"> Tempo desde a última fralda</label>
+    <label for="prefDiaperHours">Avisar depois de quantas horas</label>
+    <input type="number" id="prefDiaperHours" min="1" max="12" step="0.5" inputmode="decimal">
+    <label><input type="checkbox" id="prefMedicine"> Próxima dose de remédio</label>
+    <label><input type="checkbox" id="prefAgenda"> Compromissos da agenda</label>
+    <label><input type="checkbox" id="prefSleepStart"> "Dormindo desde" quando o sono começa</label>
+  </div>
+  <div class="actions"><button type="button" class="btn ghost" data-close>Fechar</button><button type="submit" class="btn primary" id="btnSaveNotifPrefs" hidden>Salvar</button></div>
+</form></dialog>
+
+<dialog id="dlgQuickActions">
+  <div class="dbody">
+    <h2>Atalhos rápidos</h2>
+    <p style="color:var(--muted);font-size:.9rem">Gera um link pessoal deste aparelho para usar no app
+    Atalhos do iPhone (widget, Apple Watch, Siri, Toque nas Costas, botão de Ação, Central de Controle).
+    O token vale só para este aparelho e pode ser revogado a qualquer momento.</p>
+    <div id="quickTokenNew" hidden>
+      <p class="error" style="color:var(--ok)">Copie agora — não é possível ver de novo depois de fechar.</p>
+      <textarea id="quickTokenValue" readonly rows="2" style="font-family:monospace;font-size:.8rem"></textarea>
+      <button type="button" class="btn ghost" id="btnCopyQuickToken">Copiar token</button>
+    </div>
+    <button type="button" class="btn primary" id="btnNewQuickToken">Gerar novo token</button>
+    <h2 style="font-size:1.05rem">Tokens ativos</h2>
+    <div id="quickTokenList"></div>
+    <h2 style="font-size:1.05rem">Como montar o atalho</h2>
+    <div class="guide" style="font-size:.9rem">
+      <p>No app Atalhos: novo atalho → ação "Obter conteúdo de URL" → método <strong>POST</strong> →
+      corpo JSON com <code>token</code> e <code>command</code>. URL:</p>
+      <p><code id="quickActionUrl" style="word-break:break-all"></code></p>
+      <p>Comandos: <code>sleep_start</code>, <code>sleep_stop</code>, <code>feed_start</code> (com
+      <code>side</code>: <code>peito-e</code>/<code>peito-d</code>), <code>feed_stop</code>,
+      <code>diaper</code> (com <code>kind</code>), <code>bottle</code> (com <code>ml</code>),
+      <code>status</code> (pergunta tipo "há quanto tempo está acordado?" — a resposta vem em
+      <code>text</code>, dá pra usar com "Repetir texto" pra Siri falar).</p>
+      <p>Depois é só adicionar o atalho pronto ao widget da Tela de Início, ao Apple Watch, dizer o nome
+      dele pra Siri, ou associar ao Toque nas Costas / botão de Ação / Central de Controle (iOS 18) nos
+      Ajustes do iPhone.</p>
+    </div>
+    <div class="actions"><button type="button" class="btn primary" data-close>Fechar</button></div>
+  </div>
+</dialog>
 
 <dialog id="dlgTrash">
   <div class="dbody">

@@ -11,7 +11,7 @@ import {
 import { VACCINE_SOURCE_NOTE, generateVaccineSchedule } from "./vaccines.js";
 import * as store from "./store.js";
 
-const APP_VERSION = "2026.09.18-tour";
+const APP_VERSION = "2026.09.19-notif-fix";
 // Chave pública VAPID — segura para ficar no código (é literalmente pra isso que ela existe;
 // a privada fica só nos secrets da Edge Function, nunca aqui).
 const VAPID_PUBLIC_KEY = "BGr1VlBz6C6_jQ8QM70zhjOEnDlLNF8QTUDSD9xmNc95r03q4UxXL88ztAsqAZ_I7UwvYKyYL9WKu6QdUTK6BX8";

@@ -1,7 +1,7 @@
 // Decide QUAIS lembretes estão devidos agora — puro, sem rede/envio. A Edge Function
 // (Fase 3) usa isso só para decidir; quem manda o push é código à parte. Testável com
 // node:test e reaproveitável no Deno da Edge Function (mesmo import relativo de sempre).
-import { MIN, HOUR } from "./time.js";
+import { MIN, HOUR, fmtHoursRounded30 } from "./time.js";
 
 const FIVE_MIN = 5 * MIN;
 
@@ -31,7 +31,7 @@ export function dueNotifications({ now, schedule, liveState, lastFeedEnd, lastDi
       const after = prefs.feed_after_hours ?? 3;
       if (hoursSince >= after) {
         const key = `feed:${deviceName}:${Math.floor(now / HOUR)}`;
-        if (!already(key)) due.push({ deviceName, kind: "feed", title: "Hora de mamar?", body: `${hoursSince.toFixed(1)}h desde a última mamada`, dedupeKey: key });
+        if (!already(key)) due.push({ deviceName, kind: "feed", title: "Hora de mamar?", body: `${fmtHoursRounded30(hoursSince)} desde a última mamada`, dedupeKey: key });
       }
     }
   }
@@ -43,7 +43,7 @@ export function dueNotifications({ now, schedule, liveState, lastFeedEnd, lastDi
       const after = prefs.diaper_after_hours ?? 3;
       if (hoursSince >= after) {
         const key = `diaper:${deviceName}:${Math.floor(now / HOUR)}`;
-        if (!already(key)) due.push({ deviceName, kind: "diaper", title: "Conferir fralda?", body: `${hoursSince.toFixed(1)}h desde a última troca`, dedupeKey: key });
+        if (!already(key)) due.push({ deviceName, kind: "diaper", title: "Conferir fralda?", body: `${fmtHoursRounded30(hoursSince)} desde a última troca`, dedupeKey: key });
       }
     }
   }

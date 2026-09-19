@@ -50,11 +50,23 @@ test("feed: não avisa antes do intervalo", () => {
   const due = dueNotifications({ now, schedule: null, liveState: {}, lastFeedEnd: now - HOUR, prefsByDevice: { d1: basePrefs }, alreadySent: [] });
   assert.equal(due.some(d => d.kind === "feed"), false);
 });
+test("feed: mostra a hora arredondada em 30 min no texto, sem casa decimal", () => {
+  const now = Date.now();
+  const due = dueNotifications({ now, schedule: null, liveState: {}, lastFeedEnd: now - 3.9 * HOUR, prefsByDevice: { d1: basePrefs }, alreadySent: [] });
+  const feed = due.find(d => d.kind === "feed");
+  assert.equal(feed.body, "4h desde a última mamada");
+  assert.doesNotMatch(feed.body, /[.,]\d/);
+});
 
 test("diaper: avisa depois do intervalo configurado", () => {
   const now = Date.now();
   const due = dueNotifications({ now, schedule: null, liveState: {}, lastDiaperEnd: now - 4 * HOUR, prefsByDevice: { d1: basePrefs }, alreadySent: [] });
   assert.equal(due.some(d => d.kind === "diaper"), true);
+});
+test("diaper: também mostra a hora arredondada em 30 min, sem casa decimal", () => {
+  const now = Date.now();
+  const due = dueNotifications({ now, schedule: null, liveState: {}, lastDiaperEnd: now - 3.4 * HOUR, prefsByDevice: { d1: basePrefs }, alreadySent: [] });
+  assert.equal(due.find(d => d.kind === "diaper").body, "3h30 desde a última troca");
 });
 
 test("medicine: avisa perto da próxima dose", () => {

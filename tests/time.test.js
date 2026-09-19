@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MIN, HOUR, DAY, midnight, overlap, splitByDay, fmtDur, fmtClock, dayKey } from "../docs/js/time.js";
+import { MIN, HOUR, DAY, midnight, overlap, splitByDay, fmtDur, fmtClock, dayKey, fmtHoursRounded30 } from "../docs/js/time.js";
 
 test("splitByDay divide sono que cruza a meia-noite em dois pedaços corretos", () => {
   const today = midnight(Date.now());
@@ -44,4 +44,13 @@ test("fmtClock formata cronômetro", () => {
 test("dayKey formata AAAA-MM-DD estável", () => {
   const k = dayKey(midnight(Date.now()) + 3 * HOUR);
   assert.match(k, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("fmtHoursRounded30 arredonda pro múltiplo de 30 min mais próximo, sem casa decimal", () => {
+  assert.equal(fmtHoursRounded30(3), "3h");
+  assert.equal(fmtHoursRounded30(11.9), "12h");
+  assert.equal(fmtHoursRounded30(9.4), "9h30");
+  assert.equal(fmtHoursRounded30(9.6), "9h30");
+  assert.equal(fmtHoursRounded30(9.76), "10h");
+  assert.equal(fmtHoursRounded30(0), "0h");
 });

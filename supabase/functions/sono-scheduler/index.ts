@@ -38,7 +38,10 @@ Deno.serve(async (_req) => {
     const allEvents = eventsRes.data || [];
     const sleepEvents = allEvents.filter(e => e.type === "sleep")
       .map(r => ({ id: r.id, start: r.start, end: r.end, isNight: r.is_night, data: r.data }));
-    const feeds = allEvents.filter(e => e.type === "feed" && e.end).sort((a, b) => b.end - a.end);
+    // Mamadeira/sólido são registrados sem "end" (evento instantâneo, só peito tem cronômetro) —
+    // usar "end ?? start" pra não ignorar a mamadeira mais recente e achar que já faz tempo desde
+    // a última mamada quando na verdade ela foi de mamadeira.
+    const feeds = allEvents.filter(e => e.type === "feed").sort((a, b) => (b.end ?? b.start) - (a.end ?? a.start));
     const diapers = allEvents.filter(e => e.type === "diaper").sort((a, b) => b.start - a.start);
     const medicines = allEvents.filter(e => e.type === "medicine" && e.data?.medicineIntervalHours).sort((a, b) => b.start - a.start);
 
@@ -63,7 +66,7 @@ Deno.serve(async (_req) => {
 
     const due = dueNotifications({
       now, schedule, liveState,
-      lastFeedEnd: feeds[0]?.end ?? null,
+      lastFeedEnd: feeds[0] ? (feeds[0].end ?? feeds[0].start) : null,
       lastDiaperEnd: diapers[0]?.start ?? null,
       lastMedicine, agendaItems, prefsByDevice, alreadySent,
     });

@@ -39,6 +39,14 @@ export function fmtDur(min) {
   return m ? `${h}h${pad(m)}` : `${h}h`;
 }
 
+// Horas fracionárias arredondadas pro múltiplo de 30 min mais próximo, tipo "9h30" ou "11h" —
+// usado nas notificações de tempo decorrido, pra nunca mostrar hora quebrada tipo "11,9h".
+export function fmtHoursRounded30(hours) {
+  const totalMin = Math.round(Math.max(0, hours) * 2) * 30;
+  const h = Math.floor(totalMin / 60), m = totalMin % 60;
+  return m ? `${h}h${m}` : `${h}h`;
+}
+
 export function fmtClock(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
